@@ -36,28 +36,35 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done
 ## Phase 1 — Investigations (Reactor equivalent)
 
 ### Backend
-- [ ] **1.1 Address endpoint** — `GET /api/address/:addr?limit=`
+- [x] **1.1 Address endpoint** — `GET /api/address/:addr?limit=`
   Returns chain, balance, total in/out, tx count, first/last seen, top counterparties, transfers.
   Validates address (400 on bad input), clamps `limit` ≤ 2000.
-- [ ] **1.2 Transaction endpoint** — `GET /api/tx/:chain/:hash`
+- [x] **1.2 Transaction endpoint** — `GET /api/tx/:chain/:hash`
   From, to, amount, timestamp, block, explorer link.
-- [ ] **1.3 Graph endpoint** — `GET /api/graph/:addr?depth=1&fanout=8&from=&to=&min=`
+- [x] **1.3 Graph endpoint** — `GET /api/graph/:addr?depth=1&fanout=8&from=&to=&min=`
   BFS: top `fanout` counterparties by volume per node, `depth` ≤ 3, `fanout` ≤ 15.
   Optional date range and minimum amount filters. Returns `{ nodes, edges }`; edges aggregated `from→to` with amount + count.
-- [ ] **1.4 Path finding** — `GET /api/path?from=&to=&maxHops=4`
+- [x] **1.4 Path finding** — `GET /api/path?from=&to=&maxHops=4`
   Bidirectional BFS over counterparties; returns the shortest path(s) found or "not found within N hops".
 
 ### Frontend
-- [ ] **1.5 Search page** — one input, detects chain, routes to `/address/[addr]`; shows an error for invalid addresses.
-- [ ] **1.6 Address page** — summary cards, top counterparties table, transfers table (paged), explorer links.
-- [ ] **1.7 Graph workspace** — Cytoscape: click to expand a node, edge thickness = volume, node colour = category, side panel with node details, filter controls (date, min amount), re-layout button.
-- [ ] **1.8 Transaction page** — details + links to both addresses.
-- [ ] **1.9 Path finder UI** — two inputs, draws the resulting path on the graph.
+- [x] **1.5 Search page** — one input, detects chain, routes to `/address/[addr]`; shows an error for invalid addresses.
+- [x] **1.6 Address page** — summary cards, top counterparties table, transfers table (paged), explorer links.
+- [x] **1.7 Graph workspace** — Cytoscape: click to expand a node, edge thickness = volume, node colour = category, side panel with node details, filter controls (date, min amount), re-layout button.
+- [x] **1.8 Transaction page** — details + links to both addresses.
+- [x] **1.9 Path finder UI** — two inputs, draws the resulting path on the graph.
 
 **Phase acceptance:**
 - Look up 1 real Tron and 1 real Ethereum USDT wallet; numbers match TronScan / Etherscan for the fetched window.
 - Expand a graph 2 hops without hitting rate-limit errors.
 - Path finder finds a known 2-hop path.
+
+Status 2026-11-19:
+- ✅ Tron: address, tx, graph (depth 2 = 24 nodes in 6.6 s, no rate-limit errors), path finder found a real 2-hop path in 1.4 s. Pages render with live data (checked by headless-browser screenshots).
+- ✅ Backend selfcheck covers graph BFS, fanout, directed path search, hop limit, expansion cap.
+- ⏳ Ethereum: not tested — needs `ETHERSCAN_API_KEY` in `backend/.env`.
+- ⏳ Manual spot-check of numbers against TronScan / Etherscan by a person.
+- ⏳ Path finder UI clicked through by a person (API verified, UI only rendered).
 
 ---
 

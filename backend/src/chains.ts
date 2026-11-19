@@ -1,4 +1,5 @@
-import { BadRequestException, BadGatewayException } from '@nestjs/common';
+import { BadRequestException, BadGatewayException, NotFoundException } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 
 export type Chain = 'tron' | 'eth';
 export interface Transfer {
@@ -12,7 +13,8 @@ export interface Flow {
   address: string;
   in: number;
   out: number;
-  count: number;
+  inCount: number;
+  outCount: number;
 }
 
 const TRON_USDT = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t';
@@ -37,6 +39,23 @@ export function tronToHex20(addr: string): string {
   let n = 0n;
   for (const c of addr) n = n * 58n + BigInt(B58.indexOf(c));
   return n.toString(16).padStart(50, '0').slice(2, 42);
+}
+
+/** 20-byte hex (with or without 0x) -> base58check Tron address. */
+export function hexToTron(hex20: string): string {
+  const payload = Buffer.from('41' + hex20.replace(/^0x/, '').slice(-40), 'hex');
+  const sha = (b: Buffer) => createHash('sha256').update(b).digest();
+  let n = BigInt('0x' + Buffer.concat([payload, sha(sha(payload)).subarray(0, 4)]).toString('hex'));
+  let out = '';
+  while (n > 0n) {
+    out = B58[Number(n % 58n)] + out;
+    n /= 58n;
+  }
+  return out;
+}
+
+export function isTxHash(chain: Chain, hash: string): boolean {
+  return chain === 'tron' ? /^[0-9a-fA-F]{64}$/.test(hash) : /^0x[0-9a-fA-F]{64}$/.test(hash);
 }
 
 // ponytail: in-memory cache, unbounded and lost on restart. Move to Redis if it grows or you run >1 instance.
@@ -143,7 +162,55 @@ async function ethFrozen(addr: string): Promise<boolean> {
   return typeof r === 'string' && r.length > 2 ? BigInt(r) === 1n : false;
 }
 
+// ---------- Single transaction ----------
+export interface TxDetail {
+  chain: Chain;
+  hash: string;
+  block: number;
+  timestamp: number;
+  success: boolean;
+  transfers: { from: string; to: string; amount: number }[]; // USDT transfers only
+}
+const TRANSFER_TOPIC = 'ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+
+async function tronTx(hash: string): Promise<TxDetail> {
+  const j = await fetchJson(
+    `${TRONGRID}/wallet/gettransactioninfobyid`,
+    { method: 'POST', headers: { ...tronHeaders(), 'content-type': 'application/json' }, body: JSON.stringify({ value: hash }) },
+    tronGap(),
+  );
+  if (!j?.id) throw new NotFoundException('Transaction not found on Tron');
+  const usdtHex = tronToHex20(TRON_USDT);
+  return {
+    chain: 'tron',
+    hash,
+    block: j.blockNumber,
+    timestamp: j.blockTimeStamp,
+    success: j.receipt?.result === 'SUCCESS',
+    transfers: (j.log ?? [])
+      .filter((l: any) => l.address?.slice(-40) === usdtHex && l.topics?.[0] === TRANSFER_TOPIC)
+      .map((l: any) => ({ from: hexToTron(l.topics[1]), to: hexToTron(l.topics[2]), amount: Number(BigInt('0x' + l.data)) / 1e6 })),
+  };
+}
+
+async function ethTx(hash: string): Promise<TxDetail> {
+  const r = await etherscan(`module=proxy&action=eth_getTransactionReceipt&txhash=${hash}`);
+  if (!r) throw new NotFoundException('Transaction not found on Ethereum');
+  const b = await etherscan(`module=proxy&action=eth_getBlockByNumber&tag=${r.blockNumber}&boolean=false`);
+  return {
+    chain: 'eth',
+    hash,
+    block: Number(r.blockNumber),
+    timestamp: Number(b?.timestamp ?? 0) * 1000,
+    success: r.status === '0x1',
+    transfers: (r.logs ?? [])
+      .filter((l: any) => l.address?.toLowerCase() === ETH_USDT && l.topics?.[0] === '0x' + TRANSFER_TOPIC)
+      .map((l: any) => ({ from: '0x' + l.topics[1].slice(-40), to: '0x' + l.topics[2].slice(-40), amount: Number(BigInt(l.data)) / 1e6 })),
+  };
+}
+
 // ---------- Public API ----------
+export const getTx = (c: Chain, hash: string) => (c === 'tron' ? tronTx(hash) : ethTx(hash.toLowerCase()));
 export const getTransfers = (c: Chain, a: string, max = 200) => (c === 'tron' ? tronTransfers(a, max) : ethTransfers(a, max));
 export const getBalance = (c: Chain, a: string) => (c === 'tron' ? tronBalance(a) : ethBalance(a));
 export const isTetherFrozen = (c: Chain, a: string) => (c === 'tron' ? tronFrozen(a) : ethFrozen(a));
@@ -156,10 +223,14 @@ export function flows(addr: string, transfers: Transfer[]): Flow[] {
     const incoming = norm(t.to) === me;
     const other = norm(incoming ? t.from : t.to);
     if (other === me) continue;
-    const f = m.get(other) ?? { address: other, in: 0, out: 0, count: 0 };
-    if (incoming) f.in += t.amount;
-    else f.out += t.amount;
-    f.count++;
+    const f = m.get(other) ?? { address: other, in: 0, out: 0, inCount: 0, outCount: 0 };
+    if (incoming) {
+      f.in += t.amount;
+      f.inCount++;
+    } else {
+      f.out += t.amount;
+      f.outCount++;
+    }
     m.set(other, f);
   }
   return [...m.values()].sort((a, b) => b.in + b.out - (a.in + a.out));

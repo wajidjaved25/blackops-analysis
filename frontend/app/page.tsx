@@ -1,26 +1,43 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { useState } from 'react';
+import { detectChain, detectTx } from '@/lib/format';
 
-// Phase 0 home: proves the /api proxy reaches the backend. Search arrives in task 1.5.
 export default function Home() {
-  const [status, setStatus] = useState<'checking' | 'up' | 'down'>('checking');
+  const router = useRouter();
+  const [q, setQ] = useState('');
+  const [error, setError] = useState('');
 
-  useEffect(() => {
-    fetch('/api/health')
-      .then((r) => r.json())
-      .then((j) => setStatus(j.ok ? 'up' : 'down'))
-      .catch(() => setStatus('down'));
-  }, []);
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    const v = q.trim();
+    if (detectChain(v)) return router.push(`/address/${v}`);
+    const txChain = detectTx(v);
+    if (txChain) return router.push(`/tx/${txChain}/${v}`);
+    setError('Enter a Tron address (T…), an Ethereum address (0x… 40 hex), or a transaction hash.');
+  }
 
   return (
-    <section className="card">
-      <h1>USDT Trace</h1>
-      <p className="muted">Investigate and screen USDT wallets on Tron (TRC20) and Ethereum (ERC20).</p>
-      <p>
-        Backend:{' '}
-        {status === 'checking' && <span className="muted">checking…</span>}
-        {status === 'up' && <span className="ok">connected</span>}
-        {status === 'down' && <span className="bad">not reachable — start it with <code>npm run dev</code> in backend/</span>}
+    <section className="hero">
+      <h1>Trace USDT</h1>
+      <p className="muted">Look up any wallet or transaction on Tron (TRC20) or Ethereum (ERC20).</p>
+      <form onSubmit={submit} className="search">
+        <input
+          autoFocus
+          value={q}
+          onChange={(e) => {
+            setQ(e.target.value);
+            setError('');
+          }}
+          placeholder="Address or transaction hash"
+          aria-label="Address or transaction hash"
+          spellCheck={false}
+        />
+        <button type="submit">Search</button>
+      </form>
+      {error && <p className="bad">{error}</p>}
+      <p className="muted small">
+        Or open the <a href="/graph">graph workspace</a> to trace flows and find paths between wallets.
       </p>
     </section>
   );

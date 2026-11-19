@@ -12,6 +12,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         <header className="topbar">
           <a href="/" className="brand">USDT Trace</a>
+          <a href="/">Search</a>
+          <a href="/graph">Graph</a>
         </header>
         <main>{children}</main>
       </body>
