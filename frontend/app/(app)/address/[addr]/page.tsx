@@ -22,7 +22,11 @@ export default function AddressPage() {
   const { addr } = useParams<{ addr: string }>();
   const { can } = useAuth();
   const valid = !!detectChain(addr);
-  const { data: d, loading, error, status, reload } = useApi<Addr>(valid ? `/address/${addr}` : null);
+  const [full, setFull] = useState(false);
+  // Summary first (latest 200 transfers, ~2 s); the 2-hop risk and the full history load afterwards.
+  const { data: d, loading, error, status, reload } = useApi<Addr>(valid ? `/address/${addr}?limit=${full ? 1000 : 200}` : null);
+  const deep = useApi<Assessment>(valid ? `/risk/${addr}` : null);
+  const risk = deep.data ?? d?.risk;
   const [modal, setModal] = useState<'case' | 'watch' | 'label' | null>(null);
   const [dir, setDir] = useState<'all' | 'in' | 'out'>('all');
   const [from, setFrom] = useState('');
@@ -50,7 +54,7 @@ export default function AddressPage() {
             {can('export.data') ? <a className="btn" href={`/api/address/${addr}/report.csv`} download><Download size={15} />Export CSV</a> : <Button disabled title="Requires export.data"><Download size={15} />Export CSV</Button>}
           </>} />
 
-        {loading && (
+        {loading && !d && (
           <div className="stack" role="status" aria-label="Loading address data">
             <Notice>Reading the chain, this can take 5–15 seconds for busy wallets…</Notice>
             <div className="kpis">{[0, 1, 2, 3].map((i) => <div key={i} className="card stat"><Skeleton w={90} /><Skeleton h={26} w={120} /></div>)}</div>
@@ -61,27 +65,34 @@ export default function AddressPage() {
 
         {d && (
           <>
-            {d.truncated && <Notice tone="warn">This wallet is very busy. Totals, counterparties and charts cover only its latest {d.txCount.toLocaleString()} transfers, not its full history.</Notice>}
+            {d.truncated && (
+              <Notice tone="warn">
+                <span className="row" style={{ justifyContent: 'space-between', width: '100%' }}>
+                  <span>Totals, counterparties and charts cover only the latest {d.txCount.toLocaleString()} transfers{full ? ' (the maximum shown here)' : ', not the full history'}.</span>
+                  {!full && <Button sm onClick={() => setFull(true)} disabled={loading}>{loading ? 'Loading…' : 'Load more history (up to 1,000)'}</Button>}
+                </span>
+              </Notice>
+            )}
             <div className="grid g-main">
-              <Card title="Risk assessment">
+              <Card title="Risk assessment" actions={deep.loading ? <span className="muted small" role="status">Checking 2-hop exposure…</span> : deep.error ? <span className="muted small">2-hop check unavailable</span> : undefined}>
                 <div className="row" style={{ gap: 24, alignItems: 'flex-start' }}>
-                  <div className="stack sm" style={{ alignItems: 'center' }}><RiskGauge score={d.risk.score} level={d.risk.level} /><RiskBadge level={d.risk.level} /></div>
+                  <div className="stack sm" style={{ alignItems: 'center' }}><RiskGauge score={risk!.score} level={risk!.level} /><RiskBadge level={risk!.level} /></div>
                   <div className="stack grow" style={{ minWidth: 220 }}>
                     <dl className="kv" style={{ gridTemplateColumns: '110px 1fr' }}>
-                      <dt>Own</dt><dd className="num" style={{ textAlign: 'left' }}>{d.risk.own}</dd>
-                      <dt>Direct exposure</dt><dd>{d.risk.direct}</dd>
-                      <dt>Indirect exposure</dt><dd>{d.risk.indirect}</dd>
-                      <dt>Labels</dt><dd className="row">{d.risk.labels.length ? d.risk.labels.map((l, i) => <CategoryChip key={i} category={l.category} name={l.name} />) : <span className="muted">None</span>}</dd>
+                      <dt>Own</dt><dd className="num" style={{ textAlign: 'left' }}>{risk!.own}</dd>
+                      <dt>Direct exposure</dt><dd>{risk!.direct}</dd>
+                      <dt>Indirect exposure</dt><dd>{deep.data ? risk!.indirect : <span className="muted">{deep.loading ? 'checking…' : 'n/a'}</span>}</dd>
+                      <dt>Labels</dt><dd className="row">{risk!.labels.length ? risk!.labels.map((l, i) => <CategoryChip key={i} category={l.category} name={l.name} />) : <span className="muted">None</span>}</dd>
                     </dl>
                     <ul className="reasons">
-                      {d.risk.reasons.length ? d.risk.reasons.map((r, i) => <li key={i}><span className="dot" style={{ background: 'var(--medium)', marginTop: 7 }} />{r}</li>) : <li className="muted">No risk indicators found in the transfers checked.</li>}
+                      {risk!.reasons.length ? risk!.reasons.map((r, i) => <li key={i}><span className="dot" style={{ background: 'var(--medium)', marginTop: 7 }} />{r}</li>) : <li className="muted">No risk indicators found in the transfers checked.</li>}
                     </ul>
                   </div>
                 </div>
               </Card>
               <Card title="Exposures" flush>
-                {d.risk.exposures.length ? (
-                  <Table caption="Risk exposures" rows={d.risk.exposures} rowKey={(e) => e.address} pageSize={6} cols={[
+                {risk!.exposures.length ? (
+                  <Table caption="Risk exposures" rows={risk!.exposures} rowKey={(e) => e.address} pageSize={6} cols={[
                     { key: 'a', header: 'Counterparty', cell: (e) => <AddressLink address={e.address} label={{ name: e.name, category: e.category }} /> , wrap: true },
                     { key: 'w', header: 'Weight', num: true, sort: (e) => e.weight, cell: (e) => e.weight },
                     { key: 's', header: 'Share', num: true, sort: (e) => e.share, cell: (e) => `${(e.share * 100).toFixed(1)}%` },

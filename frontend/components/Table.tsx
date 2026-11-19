@@ -11,6 +11,8 @@ export interface Col<R> {
   sort?: (r: R) => number | string | null | undefined;
   num?: boolean;
   wrap?: boolean;
+  /** hide this column on narrow screens (secondary data) */
+  hideSm?: boolean;
   className?: string;
 }
 
@@ -69,7 +71,7 @@ export function Table<R>({ cols, rows, rowKey, pageSize = 25, initialSort, capti
                 </th>
               )}
               {cols.map((c) => (
-                <th key={c.key} className={cx(c.num && 'num')} aria-sort={sort?.key === c.key ? (sort.dir === 'asc' ? 'ascending' : 'descending') : undefined}>
+                <th key={c.key} className={cx(c.num && 'num', c.hideSm && 'hide-sm')} aria-sort={sort?.key === c.key ? (sort.dir === 'asc' ? 'ascending' : 'descending') : undefined}>
                   {c.sort ? (
                     <button type="button" onClick={() => setSort(sort?.key === c.key ? { key: c.key, dir: sort.dir === 'asc' ? 'desc' : 'asc' } : { key: c.key, dir: c.num ? 'desc' : 'asc' })}>
                       {c.header}{sort?.key === c.key && (sort.dir === 'asc' ? <ArrowUp size={12} /> : <ArrowDown size={12} />)}
@@ -93,7 +95,7 @@ export function Table<R>({ cols, rows, rowKey, pageSize = 25, initialSort, capti
                       }} />
                     </td>
                   )}
-                  {cols.map((c) => <td key={c.key} className={cx(c.num && 'num', c.wrap && 'wrap', c.className)}>{c.cell(r)}</td>)}
+                  {cols.map((c) => <td key={c.key} className={cx(c.num && 'num', c.wrap && 'wrap', c.hideSm && 'hide-sm', c.className)}>{c.cell(r)}</td>)}
                 </tr>
               );
             })}

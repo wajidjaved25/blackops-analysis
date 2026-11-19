@@ -1,7 +1,7 @@
 import { BadRequestException, Controller, Get, Param, Query, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { CurrentCtx, Perm } from './auth';
-import { Chain, flows, getBalance, getTransfers, getTx, isTxHash, norm, Transfer } from './chains';
+import { Chain, flows, getBalance, getTransfers, getTx, isTetherFrozen, isTxHash, norm, Transfer } from './chains';
 import { audit, Ctx, Db } from './db';
 import { buildGraph, findPath, GetFlows, GraphNode, withVolumes } from './graph';
 import { LabelsService } from './labels';
@@ -48,9 +48,10 @@ export class InvestigateController {
     });
   }
 
-  private async summary(chain: Chain, addr: string, limit: number, orgId: number) {
-    const transfers = await getTransfers(chain, addr, limit);
-    const [balance, risk] = await Promise.all([getBalance(chain, addr), this.risk.assess(chain, addr, orgId, { transfers, deep: true })]);
+  /** Transfers, balance and freeze status are fetched concurrently; `deep` (2-hop risk, ~5 more wallets) is opt-in — the UI loads GET /risk/:addr separately. */
+  private async summary(chain: Chain, addr: string, limit: number, orgId: number, deep = false) {
+    const [transfers, balance, frozenLive] = await Promise.all([getTransfers(chain, addr, limit), getBalance(chain, addr), isTetherFrozen(chain, addr)]);
+    const risk = await this.risk.assess(chain, addr, orgId, { transfers, deep, frozen: frozenLive });
     let totalIn = 0;
     let totalOut = 0;
     for (const t of transfers) {
@@ -79,16 +80,16 @@ export class InvestigateController {
 
   @Perm('investigate.view')
   @Get('address/:addr')
-  address(@CurrentCtx() ctx: Ctx, @Param('addr') raw: string, @Query('limit') limitRaw?: string) {
+  address(@CurrentCtx() ctx: Ctx, @Param('addr') raw: string, @Query('limit') limitRaw?: string, @Query('deep') deep?: string) {
     const { chain, addr } = parseAddr(raw);
-    return this.summary(chain, addr, int(limitRaw, 1000, 1, 2000), ctx.orgId);
+    return this.summary(chain, addr, int(limitRaw, 200, 1, 2000), ctx.orgId, deep === 'true');
   }
 
   @Perm('export.data')
   @Get('address/:addr/report.csv')
   async addressCsv(@CurrentCtx() ctx: Ctx, @Param('addr') raw: string, @Res() res: Response) {
     const { chain, addr } = parseAddr(raw);
-    const s = await this.summary(chain, addr, 2000, ctx.orgId);
+    const s = await this.summary(chain, addr, 2000, ctx.orgId, true);
     await audit(this.db, ctx, 'address.export', `${chain}:${addr}`);
     const rows = [
       ['USDT Trace address report'],

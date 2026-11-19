@@ -45,8 +45,10 @@ export async function buildGraph(root: string, depth: number, fanout: number, ge
   let frontier = [root];
   for (let d = 0; d < depth && frontier.length; d++) {
     const next: string[] = [];
-    for (const a of frontier) {
-      const fl = await getFlows(a);
+    // One level's lookups run concurrently (the per-host throttle in chains.ts still spaces the calls).
+    const level = await Promise.all(frontier.map((a) => getFlows(a)));
+    for (const [i, a] of frontier.entries()) {
+      const fl = level[i];
       const n = nodes.get(a)!;
       n.expanded = true;
       n.in = fl.reduce((s, f) => s + f.in, 0);

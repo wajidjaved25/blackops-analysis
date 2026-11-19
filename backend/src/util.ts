@@ -33,7 +33,7 @@ export function oneOf<T extends string>(raw: unknown, field: string, allowed: re
 
 export function id(raw: unknown): number {
   const n = Number(raw);
-  if (!Number.isInteger(n) || n < 1) throw new BadRequestException('Invalid id');
+  if (!Number.isInteger(n) || n < 1 || n > 2_147_483_647) throw new BadRequestException('Invalid id');
   return n;
 }
 

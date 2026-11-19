@@ -80,7 +80,7 @@ export default function Dashboard() {
               <EmptyState title="No cases yet" action={can('cases.manage') ? <LinkButton href="/cases?new=1" sm variant="primary">Create a case</LinkButton> : undefined}>Cases hold the addresses, graph and notes of an investigation.</EmptyState>
             ) : cases.data.slice(0, 6).map((c) => (
               <Link key={c.id} href={`/cases/${c.id}`} className="row nw" style={{ padding: '10px 16px', borderBottom: '1px solid var(--border)', color: 'inherit' }}>
-                <div className="grow trunc"><div className="small trunc" style={{ fontWeight: 600 }}>{c.title}</div><div className="xs muted">{c.addresses} addresses · <Time t={c.updatedAt} /></div></div>
+                <div className="grow trunc"><div className="small trunc" style={{ fontWeight: 600 }}>{c.title}</div><div className="xs muted">{c.addresses} {c.addresses === 1 ? 'address' : 'addresses'} · <Time t={c.updatedAt} /></div></div>
                 <Badge tone={c.status === 'open' ? 'info' : undefined}>{c.status}</Badge>
               </Link>
             ))}
@@ -92,7 +92,7 @@ export default function Dashboard() {
               <EmptyState title="No screenings yet" action={<LinkButton href="/screening" sm variant="primary">Screen addresses</LinkButton>}>Check up to 1,000 wallets against sanctions, freezes and risky exposure.</EmptyState>
             ) : jobs.data.slice(0, 6).map((j) => (
               <Link key={j.id} href={`/screening?job=${j.id}`} className="row nw" style={{ padding: '10px 16px', borderBottom: '1px solid var(--border)', color: 'inherit' }}>
-                <div className="grow trunc"><div className="small trunc" style={{ fontWeight: 600 }}>{j.name || `Job #${j.id}`}</div><div className="xs muted">{j.total} addresses · <Time t={j.createdAt} /></div></div>
+                <div className="grow trunc"><div className="small trunc" style={{ fontWeight: 600 }}>{j.name || `Job #${j.id}`}</div><div className="xs muted">{j.total} {j.total === 1 ? 'address' : 'addresses'} · <Time t={j.createdAt} /></div></div>
                 <Badge tone={j.status === 'done' ? 'good' : j.status === 'failed' ? 'severe' : 'info'}>{j.status === 'running' ? `${j.progress}/${j.total}` : j.status}</Badge>
               </Link>
             ))}

@@ -53,7 +53,7 @@ function Profile() {
       {off && (
         <Modal title="Disable two-factor authentication" onClose={() => setOff(false)} footer={<><Button onClick={() => setOff(false)}>Cancel</Button><Button variant="solid" busy={busy} disabled={!pw} onClick={async () => {
           setBusy(true); setErr('');
-          try { await api('/auth/2fa/disable', { body: { password: pw } }); toast.success('2FA disabled'); setOff(false); refresh(); } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
+          try { await api('/auth/2fa/disable', { quiet: true, body: { password: pw } }); toast.success('2FA disabled'); setOff(false); refresh(); } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
         }}>Disable 2FA</Button></>}>
           <div className="stack"><Field label="Confirm your password"><Input type="password" value={pw} onChange={(e) => setPw(e.target.value)} autoComplete="current-password" /></Field>{err && <Notice tone="error">{err}</Notice>}</div>
         </Modal>

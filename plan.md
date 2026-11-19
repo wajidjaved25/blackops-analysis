@@ -38,7 +38,7 @@ Give investigators and compliance teams one tool to:
 | Frontend | **Next.js** (TypeScript, App Router) | User choice; proxies `/api/*` to backend, so no CORS |
 | Graph UI | **Cytoscape.js** | Mature, handles thousands of nodes, built-in layouts |
 | Database | **PostgreSQL** + **Prisma** | Labels, cases, alerts, watchlists, transfer cache |
-| Jobs | **Redis + BullMQ** | Monitoring polls, bulk screening, list refreshes |
+| Jobs | **Postgres job table** (`FOR UPDATE SKIP LOCKED`) | Bulk screening, clustering. Local Redis is 3.0 (BullMQ needs ≥5); Redis is used for cache + rate limits |
 | Runtime | Node 24, Docker Compose for Postgres + Redis | Same setup on every machine |
 
 No database/Redis until Phase 2 needs them — Phase 1 runs on an in-memory cache.

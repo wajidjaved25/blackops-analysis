@@ -71,26 +71,26 @@ Status 2026-11-19:
 ## Phase 2 — Screening & risk
 
 ### Infrastructure
-- [ ] **2.1 Docker Compose** — Postgres + Redis.
-- [ ] **2.2 Prisma** — schema for `Label`, `Transfer`; first migration.
+- [x] **2.1 Infra** — local Postgres 17 + Redis (Docker not installed on dev machine; compose file written in 6.5, untested).
+- [x] **2.2 Prisma** — full schema + migrations. `Transfer` table deliberately skipped: chain data is cached in Redis; a stored transfer index is Phase 7.1.
 
 ### Labels & sanctions
-- [ ] **2.3 OFAC import** — download USDT/TRX/ETH sanctioned-address lists (0xB10C repo, sourced from OFAC SDN), upsert as `source=ofac`; daily refresh job.
-- [ ] **2.4 Tether freeze check** — live per-address check (already in `chains.ts`), plus cache result 1 h.
-- [ ] **2.5 Tether freeze event import** — index `AddedBlackList` / `RemovedBlackList` events on both chains → `source=tether` labels (so graph nodes show frozen status without a call each).
-- [ ] **2.6 Labels API** — `GET/POST/DELETE /api/labels`; validate category against the fixed list in plan.md §5.
-- [ ] **2.7 Labels CSV import** — upload `address,chain,name,category,source`; preview → confirm.
+- [x] **2.3 OFAC import** — download USDT/TRX/ETH sanctioned-address lists (0xB10C repo, sourced from OFAC SDN), upsert as `source=ofac`; daily refresh job.
+- [x] **2.4 Tether freeze check** — live per-address check (already in `chains.ts`), plus cache result 1 h.
+- [x] **2.5 Tether freeze event import** — index `AddedBlackList` / `RemovedBlackList` events on both chains → `source=tether` labels (so graph nodes show frozen status without a call each).
+- [x] **2.6 Labels API** — `GET/POST/DELETE /api/labels`; validate category against the fixed list in plan.md §5.
+- [x] **2.7 Labels CSV import** — upload `address,chain,name,category,source`; preview → confirm.
 
 ### Risk
-- [ ] **2.8 Risk service** — implements plan.md §5 exactly (own, direct, indirect, levels, reasons).
-- [ ] **2.9 Risk endpoint** — `GET /api/risk/:addr`; risk also included in `/address` response and graph node data.
-- [ ] **2.10 Bulk screening** — `POST /api/screen` (JSON list or CSV, ≤ 1000 addresses) → BullMQ job → downloadable CSV result.
-- [ ] **2.11 Self-check** — risk scoring cases: clean wallet = 0; sanctioned = 100; 10 % volume with a scam wallet = 9.
+- [x] **2.8 Risk service** — implements plan.md §5 exactly (own, direct, indirect, levels, reasons).
+- [x] **2.9 Risk endpoint** — `GET /api/risk/:addr`; risk also included in `/address` response and graph node data.
+- [x] **2.10 Bulk screening** — `POST /api/screen` (JSON list or CSV, ≤ 1000 addresses) → BullMQ job → downloadable CSV result.
+- [x] **2.11 Self-check** — risk scoring cases: clean wallet = 0; sanctioned = 100; 10 % volume with a scam wallet = 9.
 
 ### Frontend
-- [ ] **2.12 Risk badge + reasons** on address page and graph side panel.
-- [ ] **2.13 Bulk screening page** — upload, progress, download results.
-- [ ] **2.14 Labels admin page** — list, search, add, delete, import CSV.
+- [x] **2.12 Risk badge + reasons** on address page and graph side panel.
+- [x] **2.13 Bulk screening page** — upload, progress, download results.
+- [x] **2.14 Labels admin page** — list, search, add, delete, import CSV.
 
 **Phase acceptance:** a known OFAC-listed address shows Severe/100 with an "OFAC SDN" reason; a wallet that traded with it shows non-zero exposure; bulk screen of 100 addresses completes and downloads.
 
@@ -100,13 +100,13 @@ Status 2026-11-19:
 
 ## Phase 3 — Monitoring (KYT equivalent)
 
-- [ ] **3.1 Prisma** — `Watchlist`, `WatchItem`, `Rule`, `Alert`.
-- [ ] **3.2 Watchlists API + page** — create lists, add/remove addresses (single or CSV).
-- [ ] **3.3 Rules API + page** — `amount_over`, `flagged_counterparty` (min risk level), `volume_spike` (× average).
-- [ ] **3.4 Poller job** — every N minutes per watched address: fetch transfers newer than `lastSeenTxTs`, evaluate rules, create alerts. Respect rate limits; stagger addresses.
-- [ ] **3.5 Alerts inbox** — list, filter, status changes (open → reviewing → closed), link to graph.
-- [ ] **3.6 Notifications** — email (SMTP) and webhook (POST JSON, HMAC-signed) on new alerts.
-- [ ] **3.7 Self-check** — each rule type fires on a crafted transfer and stays silent on a clean one.
+- [x] **3.1 Prisma** — `Watchlist`, `WatchItem`, `Rule`, `Alert`.
+- [x] **3.2 Watchlists API + page** — create lists, add/remove addresses (single or CSV).
+- [x] **3.3 Rules API + page** — `amount_over`, `flagged_counterparty` (min risk level), `volume_spike` (× average).
+- [x] **3.4 Poller job** — every N minutes per watched address: fetch transfers newer than `lastSeenTxTs`, evaluate rules, create alerts. Respect rate limits; stagger addresses.
+- [x] **3.5 Alerts inbox** — list, filter, status changes (open → reviewing → closed), link to graph.
+- [x] **3.6 Notifications** — email (SMTP) and webhook (POST JSON, HMAC-signed) on new alerts.
+- [x] **3.7 Self-check** — each rule type fires on a crafted transfer and stays silent on a clean one.
 
 **Phase acceptance:** add a busy Tron wallet to a watchlist with `amount_over=1000`; an alert appears within one poll cycle and a webhook is received.
 
@@ -114,14 +114,14 @@ Status 2026-11-19:
 
 ## Phase 4 — Cases & reports (Storyline equivalent)
 
-- [ ] **4.1 Prisma** — `Case`, `CaseAddress`, `CaseNote`, `CaseFile`, `AuditLog`.
-- [ ] **4.2 Cases API + pages** — create, list, status, assign roles to addresses, notes, file uploads.
-- [ ] **4.3 Save graph to case** — store Cytoscape JSON; reopen restores the same view.
-- [ ] **4.4 Timeline (Storyline) view** — case transfers ordered by time, grouped by hop, readable by non-experts.
-- [ ] **4.5 PDF report** — case summary, addresses + roles + risk, graph image, key transfers with tx hashes and explorer links, timestamp and "data source" footer.
-- [ ] **4.6 CSV exports** — transfers per address / per case.
-- [ ] **4.7 Graph PNG export.**
-- [ ] **4.8 Audit log** — record create/update/export actions.
+- [x] **4.1 Prisma** — `Case`, `CaseAddress`, `CaseNote`, `CaseFile`, `AuditLog`.
+- [x] **4.2 Cases API + pages** — create, list, status, assign roles to addresses, notes, file uploads.
+- [x] **4.3 Save graph to case** — store Cytoscape JSON; reopen restores the same view.
+- [x] **4.4 Timeline (Storyline) view** — case transfers ordered by time, grouped by hop, readable by non-experts.
+- [x] **4.5 PDF report** — case summary, addresses + roles + risk, graph image, key transfers with tx hashes and explorer links, timestamp and "data source" footer.
+- [x] **4.6 CSV exports** — transfers per address / per case.
+- [x] **4.7 Graph PNG export.**
+- [x] **4.8 Audit log** — record create/update/export actions.
 
 **Phase acceptance:** build a case from a real trace, close the browser, reopen it identical, export a PDF that someone outside the team can follow.
 
@@ -131,20 +131,37 @@ Status 2026-11-19:
 
 ## Phase 5 — Attribution engine (ongoing)
 
-- [ ] **5.1 Public label imports** — curated exchange hot wallets, community scam lists; each with `source` and `confidence`.
-- [ ] **5.2 Deposit-address clustering** — wallet that forwards most inflows to one labelled exchange hot wallet → suggested label `<Exchange> deposit` (`source=cluster`).
-- [ ] **5.3 Suggestion review queue** — analyst accepts/rejects cluster suggestions.
-- [ ] **5.4 Label propagation** — accepted cluster labels apply to the graph and risk scores.
+- [~] **5.1 Public label imports** (CSV import + import-from-URL built and tested; no third-party exchange/scam lists bundled — choose trusted sources) — curated exchange hot wallets, community scam lists; each with `source` and `confidence`.
+- [x] **5.2 Deposit-address clustering** — wallet that forwards most inflows to one labelled exchange hot wallet → suggested label `<Exchange> deposit` (`source=cluster`).
+- [x] **5.3 Suggestion review queue** — analyst accepts/rejects cluster suggestions.
+- [x] **5.4 Label propagation** — accepted cluster labels apply to the graph and risk scores.
 
 ---
 
 ## Phase 6 — Platform
 
-- [ ] **6.1 Auth** — login, sessions, password hashing.
-- [ ] **6.2 Orgs + roles** — admin / analyst / viewer; data scoped by org.
-- [ ] **6.3 API keys** — create/revoke, per-key rate limits, usage counts.
-- [ ] **6.4 Public screening API** — `GET /api/v1/screen/:addr` with API key.
-- [ ] **6.5 Deployment** — Dockerfiles, production compose, HTTPS, DB backups.
+- [x] **6.1 Auth** — login, sessions, password hashing.
+- [x] **6.2 Orgs + roles** — admin / analyst / viewer; data scoped by org.
+- [x] **6.3 API keys** — create/revoke, per-key rate limits, usage counts.
+- [x] **6.4 Public screening API** — `GET /api/v1/screen/:addr` with API key.
+- [~] **6.5 Deployment** (files written: Dockerfiles, docker-compose.yml, Caddyfile, scripts/backup.sh — NOT built or run, Docker unavailable) — Dockerfiles, production compose, HTTPS, DB backups.
+
+---
+
+## Status 2026-11-20 (Phases 2–6)
+
+Verified on live Tron data unless noted. Full Playwright suite: 14/14 passing (screens dark/light/mobile, flows, rbac, features).
+
+- ✅ Screening & risk: OFAC (478) + Tether freeze sync (8,287 frozen Tron wallets), risk scoring with reasons, 100-address bulk screen (5 min, 0 errors).
+- ✅ Monitoring: watchlists, 3 rule types, alerts inbox, webhook (HMAC verified) + email (Mailpit verified).
+- ✅ Cases: addresses/roles, notes, files, saved graph, timeline, printable report, CSV.
+- ✅ Attribution: deposit-address clustering + review queue; label CSV / URL import.
+- ✅ Platform: permission-based RBAC (20 permissions, system + custom roles), TOTP 2FA + recovery codes, sessions, org policies, API keys + public `/v1/screen`, filtered audit log, CSRF/headers hardening, Redis cache + rate limits.
+- ✅ UI: enterprise shell, dark/light, permission-aware, i2-style link graph, radial activity heatmap.
+- ⏳ Ethereum (ERC20): untested everywhere — needs `ETHERSCAN_API_KEY`.
+- ⏳ Deployment files never run (no Docker here).
+- ⏳ Speed: cold graph depth 2 on busy wallets 18–32 s — free TronGrid is the bottleneck; add `TRONGRID_API_KEY`.
+- Deferred (see docs/api.md): global label sync/import is visible to all orgs (fine single-tenant); no CSP header; set `APP_SECRET` in production to encrypt 2FA secrets.
 
 ---
 

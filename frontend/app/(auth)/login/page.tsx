@@ -24,7 +24,7 @@ function Login() {
     try {
       await api('/auth/login', { quiet: true, body: { email: email.trim(), password, ...(step === 'totp' ? { totp: totp.trim() } : {}) } });
       const next = new URLSearchParams(location.search).get('next');
-      location.href = next && next.startsWith('/') && !next.startsWith('//') ? next : '/';
+      location.href = next && /^\/(?![/\\])/.test(next) ? next : '/';
     } catch (x) {
       const a = x as ApiError;
       if (a.code === 'TOTP_REQUIRED') { if (step === 'totp') setErr('That code is not valid. Try again or use a recovery code.'); setStep('totp'); }

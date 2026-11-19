@@ -87,7 +87,7 @@ Admins can create **custom roles** with any subset (cannot grant a permission th
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/address/:addr?limit=1000` | `{ chain, address, balance, frozen, totalIn, totalOut, txCount, truncated, firstSeen, lastSeen, risk: Assessment, counterparties: [{ address, in, out, inCount, outCount, label: {name, category} \| null }], transfers: [{ hash, from, to, amount, timestamp }] }`. `truncated=true` → totals cover only the latest `txCount` transfers. ~5–15 s. |
+| GET | `/address/:addr?limit=200&deep=false` | `{ chain, address, balance, frozen, totalIn, totalOut, txCount, truncated, firstSeen, lastSeen, risk: Assessment, counterparties: [{ address, in, out, inCount, outCount, label: {name, category} \| null }], transfers: [{ hash, from, to, amount, timestamp }] }`. `truncated=true` → totals cover only the latest `txCount` transfers. **Default `limit=200` (one TronGrid page, ~2 s); max 2000.** `risk` is the *shallow* assessment (own labels, direct exposure, freeze check; `indirect` = 0) unless `deep=true`. The UI shows this at once, then loads `GET /risk/:addr` for the 2-hop result and offers "Load more history" (`limit=1000`, ~5 pages, 10–20 s on busy wallets). Balance, transfers and the freeze check run concurrently. |
 | GET | `/address/:addr/report.csv` | CSV download (summary + all transfers) |
 | GET | `/tx/:chain/:hash` | chain `tron`\|`eth` → `{ chain, hash, block, timestamp, success, transfers: [{ from, to, amount }] }` |
 | GET | `/graph/:addr?depth=1&fanout=8&from=&to=&min=` | depth 1–3, fanout 1–15, from/to ISO date or ms, min USDT → `{ chain, nodes: [{ id, root?, expanded, in?, out?, label?, category? }], edges: [{ id, source, target, amount, count }] }`. Edge id = `source>target`. |
@@ -100,7 +100,7 @@ Admins can create **custom roles** with any subset (cannot grant a permission th
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/risk/:addr` | `Assessment` with 2-hop indirect exposure |
+| GET | `/risk/:addr` | `Assessment` with 2-hop indirect exposure, scored on the latest 200 transfers (same page the address summary reads, so it is a cache hit) + the top 5 unflagged counterparties' latest 200 (fetched concurrently). 5–20 s cold. |
 | POST | `/screen` | `{ name?, addresses?: string[] }` or `{ name?, csv: string }` (any cell that is an address), max 1000 → `{ id, total }`. Runs in background. |
 | GET | `/screen` | latest 50 jobs `[{ id, name, status: queued\|running\|done\|failed, progress, total, createdAt, updatedAt, error }]` |
 | GET | `/screen/:id` | `{ id, status, progress, total, error, rows: [{ chain, address, score, level, frozen, labels, reasons, error? }] }` — poll every 2–3 s while running |
@@ -177,6 +177,7 @@ Webhook: POST JSON `{ event: 'alert.created', alert }`, header `X-USDT-Trace-Sig
 
 ## Implementation notes (backend, verified against the running server on Tron)
 
+- **Upstream throttling:** chain calls share a per-host pool (max 2 in flight, 350 ms start gap without a `TRONGRID_API_KEY`); a 429 pauses the whole host with exponential back-off; identical concurrent requests are de-duplicated; responses are cached in Redis for 15 min. Unauthenticated TronGrid is the bottleneck (1–5 s per call) — set `TRONGRID_API_KEY` to remove most of the wait. Graph levels are fetched concurrently.
 - **Route guard** fails closed: a route with no permission decorator is refused. API keys work only on `/v1/*`; a session cookie does not work there.
 - **Restricted sessions** (extra to the contract): `GET /auth/me` also returns `mustChangePassword`. While `mustChangePassword` is true every route except `/auth/me`, `/auth/password`, `/auth/logout`, `/auth/2fa/*`, `/auth/sessions*`, `/permissions` returns `403 { code: 'PASSWORD_CHANGE_REQUIRED' }`; while the org requires 2FA and the user has not enrolled, the same routes are open and everything else returns `403 { code: 'TOTP_ENROLL_REQUIRED' }`. A disabled user's existing session returns `401 { code: 'USER_DISABLED' }`.
 - `POST /auth/password` also signs out the user's other sessions. TOTP codes cannot be replayed (a used step is rejected); a recovery code can be typed into the `totp` field of `/auth/login` instead of an app code (one use each).
@@ -188,3 +189,4 @@ Webhook: POST JSON `{ event: 'alert.created', alert }`, header `X-USDT-Trace-Sig
 - **Timeline** `hop`: distance in transfers, ignoring direction, from the first `victim` (else first `suspect`, else the first address) among the case's wallets: a transfer touching that wallet is hop 1, the next layer hop 2. `null` = not connected to it. Wallets in the saved graph also count; at most 25 wallets are checked (live chain calls). `GET /cases/:id/report` additionally returns `warnings: string[]` (wallets that could not be fetched, truncation).
 - **Attribution:** `POST /attribution/run` returns 400 with a clear message when there is no `exchange`-category label (no exchange addresses are shipped — import or add hot wallets). Cluster-source labels are never used as anchors. Suggestion rules: ≥ 90 % of the candidate's outflow goes to the hot wallet and ≥ 3 distinct depositors; confidence ≤ 0.9. Accepting creates an org label (`source=cluster`, category `exchange`) used by risk and graphs.
 - **Not verified:** all Ethereum paths (no `ETHERSCAN_API_KEY`).
+- **CSRF / request hygiene:** besides `SameSite=Lax`, every non-GET request must carry `Content-Type: application/json` (or `multipart/form-data` for uploads) — otherwise `415`; a request with `Sec-Fetch-Site: cross-site` or an `Origin` that is not the site's own host (or in `ALLOWED_ORIGINS`) gets `403`. Requests without an Origin (curl, API keys) pass. All API responses send `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`. Ids above 2^31-1 return `400 Invalid id`.

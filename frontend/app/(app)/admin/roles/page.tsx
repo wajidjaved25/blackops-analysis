@@ -53,7 +53,7 @@ export default function Roles() {
     <RequirePerm perm={['roles.manage', 'users.manage']}>
       <div className="page stack" style={{ gap: 20 }}>
         <PageHeader title="Roles & permissions" sub="Control exactly what each group of people can do." crumbs={[{ label: 'Admin' }, { label: 'Roles' }]}
-          actions={<Button variant="primary" disabled={!manage} title={manage ? '' : 'Requires roles.manage'} onClick={() => setSelId('new')}><Plus size={15} />New role</Button>} />
+          actions={<Button variant="primary" disabled={!manage} title={manage ? '' : 'Requires roles.manage'} onClick={() => { setDraft({ name: '', description: '', permissions: new Set() }); setSelId('new'); }}><Plus size={15} />New role</Button>} />
         {(roles.loading || perms.loading) && <div className="card"><SkeletonRows /></div>}
         {roles.error && <div className="card"><ErrorState error={roles.error} status={roles.status} onRetry={roles.reload} /></div>}
         {roles.data && (
@@ -71,8 +71,12 @@ export default function Roles() {
             </Card>
             <Card title={selId === 'new' ? 'New role' : role?.name} actions={role?.system && <Badge><Lock size={11} />System role, read-only</Badge>}>
               <div className="stack">
-                <Field label="Name"><Input value={draft.name} disabled={readOnly} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></Field>
-                <Field label="Description"><Textarea rows={2} value={draft.description} disabled={readOnly} onChange={(e) => setDraft({ ...draft, description: e.target.value })} /></Field>
+                {readOnly ? (
+                  <p className="muted" style={{ margin: 0 }}>{draft.description || 'No description.'}</p>
+                ) : (<>
+                  <Field label="Name"><Input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></Field>
+                  <Field label="Description"><Textarea rows={2} value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} /></Field>
+                </>)}
                 {perms.error ? <Notice tone="warn">Could not load permissions: {perms.error}</Notice> : (
                   <fieldset style={{ border: 0, padding: 0, margin: 0 }} className="stack">
                     <legend className="lbl-t" style={{ marginBottom: 8 }}>Permissions ({draft.permissions.size})</legend>

@@ -20,7 +20,7 @@ export function ChangePasswordForm({ onDone }: { onDone?: () => void }) {
       e.preventDefault();
       if (bad || !next) return;
       setBusy(true); setErr('');
-      try { await api('/auth/password', { body: { current: cur, next } }); toast.success('Password changed'); setCur(''); setNext(''); setAgain(''); onDone?.(); }
+      try { await api('/auth/password', { quiet: true, body: { current: cur, next } }); toast.success('Password changed'); setCur(''); setNext(''); setAgain(''); onDone?.(); }
       catch (x) { setErr((x as Error).message); } finally { setBusy(false); }
     }}>
       <Field label="Current password"><Input type="password" autoComplete="current-password" value={cur} onChange={(e) => setCur(e.target.value)} required /></Field>

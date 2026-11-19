@@ -38,11 +38,11 @@ export default function Audit() {
               empty={<EmptyState icon={<History size={22} />} title="No entries match" />}
               cols={[
                 { key: 't', header: 'When', cell: (r) => <DateTime t={r.createdAt} /> },
-                { key: 'u', header: 'User', cell: (r) => who(r.user) },
+                { key: 'u', header: 'User', hideSm: true, cell: (r) => who(r.user) },
                 { key: 'a', header: 'Action', cell: (r) => <Badge>{r.action}</Badge> },
-                { key: 'g', header: 'Target', cell: (r) => <span className="mono small break">{r.target ?? '—'}</span>, wrap: true },
-                { key: 'd', header: 'Detail', wrap: true, cell: (r) => <span className="xs muted break">{r.detail == null ? '' : typeof r.detail === 'string' ? r.detail : JSON.stringify(r.detail)}</span> },
-                { key: 'i', header: 'IP', cell: (r) => <span className="mono xs muted">{r.ip ?? ''}</span> },
+                { key: 'g', header: 'Target', hideSm: true, cell: (r) => <span className="mono small break">{r.target ?? '—'}</span>, wrap: true },
+                { key: 'd', header: 'Detail', hideSm: true, wrap: true, cell: (r) => <span className="xs muted break">{r.detail == null ? '' : typeof r.detail === 'string' ? r.detail : JSON.stringify(r.detail)}</span> },
+                { key: 'i', header: 'IP', hideSm: true, cell: (r) => <span className="mono xs muted">{r.ip ?? ''}</span> },
               ]} />
           )}
         </Card>

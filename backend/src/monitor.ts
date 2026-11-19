@@ -12,6 +12,9 @@ import { assertPublicUrl, extractAddresses, found, id, int, oneOf, str } from '.
 
 const ALERT_STATUSES = ['open', 'reviewing', 'closed'] as const;
 
+/** Webhook URLs can embed secrets (tokens in the path/query), so logs only ever show the host. */
+const safeHost = (url: string) => { try { return new URL(url).host; } catch { return 'invalid-url'; } };
+
 @Injectable()
 export class Notifier {
   private log = new Logger('Notifier');
@@ -44,10 +47,10 @@ export class Notifier {
         body,
         signal: AbortSignal.timeout(10_000),
       });
-      if (!r.ok) this.log.warn(`webhook ${url} returned HTTP ${r.status}`);
+      if (!r.ok) this.log.warn(`webhook ${new URL(url).host} returned HTTP ${r.status}`);
       return r.ok;
     } catch (e) {
-      this.log.warn(`webhook ${url} failed: ${(e as Error).message}`);
+      this.log.warn(`webhook ${safeHost(url)} failed: ${(e as Error).message}`);
       return false;
     }
   }

@@ -1,7 +1,9 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
+import type { NextFunction, Request, Response } from 'express';
 import { AppModule } from './app.module';
+import { csrfGuard } from './csrf';
 
 async function bootstrap() {
   try {
@@ -10,6 +12,15 @@ async function bootstrap() {
     console.warn('No backend/.env found — copy .env.example to .env (DATABASE_URL is required)');
   }
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  app.disable('x-powered-by');
+  app.use((_req: Request, res: Response, next: NextFunction) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Cache-Control', 'no-store'); // API responses hold investigation data
+    next();
+  });
+  app.use(csrfGuard);
   app.setGlobalPrefix('api');
   app.useBodyParser('json', { limit: '12mb' }); // case graph snapshots and CSV imports
   if (process.env.TRUST_PROXY === 'true') app.set('trust proxy', 1); // behind Caddy/nginx: real client IP for rate limits

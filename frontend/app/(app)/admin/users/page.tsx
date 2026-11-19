@@ -75,9 +75,9 @@ export default function UsersPage() {
                   <Select sm style={{ width: 130 }} aria-label={`Role for ${u.name}`} value={u.role?.id ?? ''} disabled={u.id === me?.id} onChange={(e) => act(() => api(`/users/${u.id}`, { method: 'PATCH', body: { roleId: Number(e.target.value) } }), 'Role changed')}>
                     {(roles.data ?? [u.role]).map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
                   </Select>) },
-                { key: 's', header: 'Status', cell: (u) => <Badge tone={u.status === 'active' ? 'good' : 'outline'}>{u.status}</Badge> },
-                { key: 't', header: '2FA', cell: (u) => (u.totpEnabled ? <Badge tone="info">On</Badge> : <span className="faint">Off</span>) },
-                { key: 'l', header: 'Last login', sort: (u) => (u.lastLoginAt ? Date.parse(u.lastLoginAt) : 0), cell: (u) => <Time t={u.lastLoginAt} /> },
+                { key: 's', header: 'Status', hideSm: true, cell: (u) => <Badge tone={u.status === 'active' ? 'good' : 'outline'}>{u.status}</Badge> },
+                { key: 't', header: '2FA', hideSm: true, cell: (u) => (u.totpEnabled ? <Badge tone="info">On</Badge> : <span className="faint">Off</span>) },
+                { key: 'l', header: 'Last login', hideSm: true, sort: (u) => (u.lastLoginAt ? Date.parse(u.lastLoginAt) : 0), cell: (u) => <Time t={u.lastLoginAt} /> },
                 { key: 'x', header: '', cell: (u) => <RowMenu u={u} self={u.id === me?.id} onPick={(k) => run(k, u)} /> },
               ]} />
           )}

@@ -67,26 +67,60 @@ export function isTxHash(chain: Chain, hash: string): boolean {
   return chain === 'tron' ? /^[0-9a-fA-F]{64}$/.test(hash) : /^0x[0-9a-fA-F]{64}$/.test(hash);
 }
 
-const TTL_SEC = 300; // cache lives in Redis (kv.ts), memory fallback if Redis is down
-const tails = new Map<string, Promise<void>>();
+const TTL_SEC = 900; // cache lives in Redis (kv.ts), memory fallback if Redis is down
+const inflight = new Map<string, Promise<any>>(); // identical concurrent requests share one upstream call
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+const MAX_CONCURRENT = 2; // per upstream host: unauthenticated TronGrid answers 429 to bursts, so a small pool + shared back-off is faster than a flood
+class HostState {
+  active = 0;
+  nextStart = 0;
+  pauseUntil = 0;
+  waiters: (() => void)[] = [];
+  async acquire(gapMs: number) {
+    while (this.active >= MAX_CONCURRENT) await new Promise<void>((r) => this.waiters.push(r));
+    this.active++;
+    const at = Math.max(Date.now(), this.nextStart, this.pauseUntil);
+    this.nextStart = at + gapMs;
+    await sleep(at - Date.now());
+  }
+  release() {
+    this.active--;
+    this.waiters.shift()?.();
+  }
+}
+const hosts = new Map<string, HostState>();
+const hostState = (h: string) => hosts.get(h) ?? hosts.set(h, new HostState()).get(h)!;
+
 /** Cached fetch, serialized per host with a gap to respect free-tier rate limits. `fresh` skips the cache read. */
-async function fetchJson(url: string, init: RequestInit = {}, gapMs = 250, fresh = false): Promise<any> {
+function fetchJson(url: string, init: RequestInit = {}, gapMs = 250, fresh = false): Promise<any> {
   const key = url + (init.body ?? '');
+  const p = inflight.get(key);
+  if (p && !fresh) return p;
+  const run = fetchJsonUncached(key, url, init, gapMs, fresh).finally(() => inflight.delete(key));
+  inflight.set(key, run);
+  return run;
+}
+
+async function fetchJsonUncached(key: string, url: string, init: RequestInit, gapMs: number, fresh: boolean): Promise<any> {
   if (!fresh) {
     const hit = await cacheGet(key);
     if (hit !== undefined) return hit;
   }
   const host = new URL(url).host;
-  const wait = tails.get(host) ?? Promise.resolve();
-  tails.set(host, wait.then(() => sleep(gapMs)));
-  await wait;
-  let res = await fetch(url, init);
-  // Free tiers rate-limit bursts: back off 1s, 2s, 4s, 8s before giving up.
-  for (let i = 0; (res.status === 429 || res.status === 503) && i < 4; i++) {
-    await sleep(1000 * 2 ** i);
+  const h = hostState(host);
+  await h.acquire(gapMs);
+  let res: Response;
+  try {
     res = await fetch(url, init);
+    // Free tiers rate-limit bursts: pause the whole host (not just this call) 1s, 2s, 4s, 8s before giving up.
+    for (let i = 0; (res.status === 429 || res.status === 503) && i < 4; i++) {
+      h.pauseUntil = Math.max(h.pauseUntil, Date.now() + 1000 * 2 ** i);
+      await sleep(Math.max(0, h.pauseUntil - Date.now()));
+      res = await fetch(url, init);
+    }
+  } finally {
+    h.release();
   }
   if (!res.ok) throw new BadGatewayException(`${host} returned HTTP ${res.status}${res.status === 429 ? ' (rate limited — add an API key in backend/.env)' : ''}`);
   const data = await res.json();
