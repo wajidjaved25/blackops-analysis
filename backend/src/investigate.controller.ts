@@ -1,22 +1,16 @@
-import { BadRequestException, Controller, Get, Param, Query } from '@nestjs/common';
-import { Chain, detectChain, flows, getBalance, getTransfers, getTx, isTetherFrozen, isTxHash, norm, Transfer } from './chains';
-import { buildGraph, findPath, GetFlows } from './graph';
+import { BadRequestException, Controller, Get, Param, Query, Res } from '@nestjs/common';
+import type { Response } from 'express';
+import { CurrentCtx } from './auth';
+import { Chain, flows, getBalance, getTransfers, getTx, isTxHash, norm, Transfer } from './chains';
+import { audit, Ctx, Db } from './db';
+import { buildGraph, findPath, GetFlows, GraphNode } from './graph';
+import { LabelsService } from './labels';
+import { RiskService } from './risk';
+import { topLabel } from './risk-score';
+import { int, parseAddr, toCsv } from './util';
 
 // ponytail: graph/path read only the latest 200 transfers per node. The Phase 7 indexer lifts this.
 const PER_NODE = 200;
-
-function parseAddr(raw: string): { chain: Chain; addr: string } {
-  const chain = detectChain(raw?.trim() ?? '');
-  if (!chain) throw new BadRequestException('Not a valid Tron (T…) or Ethereum (0x…) address');
-  return { chain, addr: norm(raw.trim()) };
-}
-
-function int(raw: string | undefined, def: number, min: number, max: number): number {
-  if (raw === undefined || raw === '') return def;
-  const n = Number(raw);
-  if (!Number.isInteger(n)) throw new BadRequestException(`Expected an integer, got "${raw}"`);
-  return Math.min(max, Math.max(min, n));
-}
 
 function time(raw: string | undefined): number | undefined {
   if (!raw) return undefined;
@@ -39,12 +33,24 @@ function flowsFor(chain: Chain, f: Filter): GetFlows {
 
 @Controller()
 export class InvestigateController {
-  @Get('address/:addr')
-  async address(@Param('addr') raw: string, @Query('limit') limitRaw?: string) {
-    const { chain, addr } = parseAddr(raw);
-    const limit = int(limitRaw, 1000, 1, 2000);
+  constructor(
+    private db: Db,
+    private labels: LabelsService,
+    private risk: RiskService,
+  ) {}
+
+  /** Adds the highest-risk label (name + category) to each graph node. */
+  private async labelNodes<T extends GraphNode>(chain: Chain, nodes: T[], orgId: number) {
+    const m = await this.labels.lookup(chain, nodes.map((n) => n.id), orgId);
+    return nodes.map((n) => {
+      const top = topLabel(m.get(n.id) ?? []);
+      return top ? { ...n, label: top.name, category: top.category } : n;
+    });
+  }
+
+  private async summary(chain: Chain, addr: string, limit: number, orgId: number) {
     const transfers = await getTransfers(chain, addr, limit);
-    const [balance, frozen] = await Promise.all([getBalance(chain, addr), isTetherFrozen(chain, addr)]);
+    const [balance, risk] = await Promise.all([getBalance(chain, addr), this.risk.assess(chain, addr, orgId, { transfers, deep: true })]);
     let totalIn = 0;
     let totalOut = 0;
     for (const t of transfers) {
@@ -52,25 +58,59 @@ export class InvestigateController {
       if (norm(t.from) === addr) totalOut += t.amount;
     }
     const times = transfers.map((t) => t.timestamp);
+    const fl = flows(addr, transfers).slice(0, 25);
+    const cpLabels = await this.labels.lookup(chain, fl.map((f) => f.address), orgId);
     return {
       chain,
       address: addr,
       balance,
-      frozen,
+      frozen: risk.frozen,
       totalIn,
       totalOut,
       txCount: transfers.length,
-      // Totals cover only the fetched window when this is true.
-      truncated: transfers.length >= limit,
+      truncated: transfers.length >= limit, // totals cover only the fetched window when true
       firstSeen: times.length ? Math.min(...times) : null,
       lastSeen: times.length ? Math.max(...times) : null,
-      counterparties: flows(addr, transfers).slice(0, 25),
+      risk,
+      counterparties: fl.map((f) => ({ ...f, label: topLabel(cpLabels.get(f.address) ?? []) })),
       transfers,
     };
   }
 
+  @Get('address/:addr')
+  address(@CurrentCtx() ctx: Ctx, @Param('addr') raw: string, @Query('limit') limitRaw?: string) {
+    const { chain, addr } = parseAddr(raw);
+    return this.summary(chain, addr, int(limitRaw, 1000, 1, 2000), ctx.orgId);
+  }
+
+  @Get('address/:addr/report.csv')
+  async addressCsv(@CurrentCtx() ctx: Ctx, @Param('addr') raw: string, @Res() res: Response) {
+    const { chain, addr } = parseAddr(raw);
+    const s = await this.summary(chain, addr, 2000, ctx.orgId);
+    await audit(this.db, ctx, 'address.export', `${chain}:${addr}`);
+    const rows = [
+      ['USDT Trace address report'],
+      ['address', addr],
+      ['chain', chain],
+      ['generated_at', new Date().toISOString()],
+      ['balance_usdt', s.balance],
+      ['risk_score', s.risk.score],
+      ['risk_level', s.risk.level],
+      ['frozen_by_tether', s.frozen],
+      ['labels', s.risk.labels.map((l) => `${l.name} (${l.category}, ${l.source})`).join('; ')],
+      ...s.risk.reasons.map((r) => ['reason', r]),
+      ['transfers_included', s.txCount, s.truncated ? 'latest only — wallet has more history' : 'complete'],
+      [],
+      ['time_utc', 'direction', 'from', 'to', 'amount_usdt', 'tx_hash'],
+      ...s.transfers.map((t) => [new Date(t.timestamp).toISOString(), norm(t.to) === addr ? 'IN' : 'OUT', t.from, t.to, t.amount, t.hash]),
+    ];
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${chain}-${addr}.csv"`);
+    res.send(toCsv(rows));
+  }
+
   @Get('tx/:chain/:hash')
-  async tx(@Param('chain') chain: string, @Param('hash') hash: string) {
+  tx(@Param('chain') chain: string, @Param('hash') hash: string) {
     if (chain !== 'tron' && chain !== 'eth') throw new BadRequestException('chain must be "tron" or "eth"');
     if (!isTxHash(chain, hash)) throw new BadRequestException(`Not a valid ${chain} transaction hash`);
     return getTx(chain, hash);
@@ -78,6 +118,7 @@ export class InvestigateController {
 
   @Get('graph/:addr')
   async graph(
+    @CurrentCtx() ctx: Ctx,
     @Param('addr') raw: string,
     @Query('depth') depth?: string,
     @Query('fanout') fanout?: string,
@@ -89,16 +130,16 @@ export class InvestigateController {
     const filter = { from: time(from), to: time(to), min: min ? Number(min) : undefined };
     if (filter.min !== undefined && Number.isNaN(filter.min)) throw new BadRequestException('min must be a number');
     const g = await buildGraph(addr, int(depth, 1, 1, 3), int(fanout, 8, 1, 15), flowsFor(chain, filter));
-    return { chain, ...g };
+    return { chain, nodes: await this.labelNodes(chain, g.nodes, ctx.orgId), edges: g.edges };
   }
 
   @Get('path')
-  async path(@Query('from') fromRaw: string, @Query('to') toRaw: string, @Query('maxHops') maxHops?: string, @Query('fanout') fanout?: string) {
+  async path(@CurrentCtx() ctx: Ctx, @Query('from') fromRaw: string, @Query('to') toRaw: string, @Query('maxHops') maxHops?: string, @Query('fanout') fanout?: string) {
     const a = parseAddr(fromRaw);
     const b = parseAddr(toRaw);
     if (a.chain !== b.chain) throw new BadRequestException('Both addresses must be on the same chain');
     if (a.addr === b.addr) throw new BadRequestException('From and to are the same address');
     const r = await findPath(a.addr, b.addr, int(maxHops, 4, 1, 6), int(fanout, 10, 1, 25), flowsFor(a.chain, {}));
-    return { chain: a.chain, ...r };
+    return { chain: a.chain, ...r, nodes: await this.labelNodes(a.chain, r.nodes, ctx.orgId) };
   }
 }

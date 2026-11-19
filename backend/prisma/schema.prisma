@@ -1,0 +1,239 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Platform (Phase 6) ----------
+
+model Org {
+  id        Int      @id @default(autoincrement())
+  name      String
+  createdAt DateTime @default(now())
+  users     User[]
+}
+
+model User {
+  id           Int       @id @default(autoincrement())
+  orgId        Int
+  org          Org       @relation(fields: [orgId], references: [id])
+  email        String    @unique
+  name         String
+  passwordHash String
+  role         String    @default("analyst") // admin | analyst | viewer
+  createdAt    DateTime  @default(now())
+  sessions     Session[]
+}
+
+model Session {
+  id        String   @id // sha256 of the cookie token
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+}
+
+model ApiKey {
+  id              Int       @id @default(autoincrement())
+  orgId           Int
+  name            String
+  prefix          String // first chars, shown in UI to identify the key
+  keyHash         String    @unique
+  rateLimitPerMin Int       @default(60)
+  usageCount      Int       @default(0)
+  lastUsedAt      DateTime?
+  revokedAt       DateTime?
+  createdAt       DateTime  @default(now())
+}
+
+model AuditLog {
+  id        Int      @id @default(autoincrement())
+  orgId     Int
+  userId    Int?
+  action    String // e.g. case.create, case.export, label.delete
+  target    String
+  detail    Json?
+  createdAt DateTime @default(now())
+
+  @@index([orgId, createdAt])
+}
+
+// ---------- Screening (Phase 2) ----------
+
+/// orgId 0 = global label (OFAC, Tether, public imports); otherwise private to that org.
+model Label {
+  id         Int      @id @default(autoincrement())
+  orgId      Int      @default(0)
+  chain      String // tron | eth
+  address    String // eth lowercase, tron base58
+  name       String
+  category   String
+  source     String // ofac | tether | manual | import | cluster
+  confidence Float    @default(1)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([chain, address, source, orgId])
+  @@index([chain, address])
+}
+
+/// Postgres-backed job queue (instead of Redis/BullMQ).
+model Job {
+  id        Int      @id @default(autoincrement())
+  orgId     Int
+  type      String // screen | cluster
+  status    String   @default("queued") // queued | running | done | failed
+  payload   Json
+  result    Json?
+  error     String?
+  progress  Int      @default(0)
+  total     Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, id])
+}
+
+/// Small key/value store for sync cursors (e.g. last imported Tether freeze event).
+model Setting {
+  key   String @id
+  value String
+}
+
+// ---------- Monitoring (Phase 3) ----------
+
+model Watchlist {
+  id        Int         @id @default(autoincrement())
+  orgId     Int
+  name      String
+  createdAt DateTime    @default(now())
+  items     WatchItem[]
+  rules     Rule[]
+}
+
+model WatchItem {
+  id            Int       @id @default(autoincrement())
+  watchlistId   Int
+  watchlist     Watchlist @relation(fields: [watchlistId], references: [id], onDelete: Cascade)
+  chain         String
+  address       String
+  note          String?
+  lastSeenTs    BigInt? // ms timestamp of newest transfer already evaluated
+  lastCheckedAt DateTime?
+  createdAt     DateTime  @default(now())
+  alerts        Alert[]
+
+  @@unique([watchlistId, chain, address])
+}
+
+model Rule {
+  id          Int       @id @default(autoincrement())
+  watchlistId Int
+  watchlist   Watchlist @relation(fields: [watchlistId], references: [id], onDelete: Cascade)
+  type        String // amount_over | flagged_counterparty | volume_spike
+  params      Json
+  enabled     Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  alerts      Alert[]
+}
+
+model Alert {
+  id           Int       @id @default(autoincrement())
+  orgId        Int
+  watchItemId  Int
+  watchItem    WatchItem @relation(fields: [watchItemId], references: [id], onDelete: Cascade)
+  ruleId       Int
+  rule         Rule      @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  dedupKey     String // tx hash, or spike:<hour bucket>
+  chain        String
+  address      String
+  counterparty String?
+  amount       Float?
+  txHash       String?
+  detail       String
+  status       String    @default("open") // open | reviewing | closed
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@unique([ruleId, watchItemId, dedupKey])
+  @@index([orgId, status, createdAt])
+}
+
+model NotifyTarget {
+  id        Int      @id @default(autoincrement())
+  orgId     Int
+  type      String // email | webhook
+  target    String // email address or URL
+  secret    String? // webhook HMAC secret
+  createdAt DateTime @default(now())
+}
+
+// ---------- Cases (Phase 4) ----------
+
+model Case {
+  id          Int           @id @default(autoincrement())
+  orgId       Int
+  title       String
+  description String        @default("")
+  status      String        @default("open") // open | closed
+  graphJson   Json?
+  graphPng    String? // data URL captured from the graph workspace
+  createdById Int?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  addresses   CaseAddress[]
+  notes       CaseNote[]
+  files       CaseFile[]
+}
+
+model CaseAddress {
+  id      Int    @id @default(autoincrement())
+  caseId  Int
+  case    Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  chain   String
+  address String
+  role    String @default("other") // suspect | victim | exchange | intermediary | other
+  note    String @default("")
+
+  @@unique([caseId, chain, address])
+}
+
+model CaseNote {
+  id        Int      @id @default(autoincrement())
+  caseId    Int
+  case      Case     @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  authorId  Int?
+  body      String
+  createdAt DateTime @default(now())
+}
+
+model CaseFile {
+  id           Int      @id @default(autoincrement())
+  caseId       Int
+  case         Case     @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  name         String
+  storedName   String
+  size         Int
+  mime         String
+  uploadedById Int?
+  createdAt    DateTime @default(now())
+}
+
+// ---------- Attribution (Phase 5) ----------
+
+model ClusterSuggestion {
+  id         Int      @id @default(autoincrement())
+  orgId      Int
+  chain      String
+  address    String
+  name       String
+  category   String
+  confidence Float
+  evidence   Json
+  status     String   @default("pending") // pending | accepted | rejected
+  createdAt  DateTime @default(now())
+
+  @@unique([orgId, chain, address, name])
+}

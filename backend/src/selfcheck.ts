@@ -2,6 +2,8 @@
 import assert from 'node:assert/strict';
 import { detectChain, flows, hexToTron, isTxHash, norm, Transfer, tronToHex20 } from './chains';
 import { buildGraph, findPath } from './graph';
+import { level, scoreRisk } from './risk-score';
+import { parseCsv, toCsv } from './util';
 
 async function main() {
   // --- address handling ---
@@ -63,6 +65,35 @@ async function main() {
   calls = 0;
   const capped = await findPath('A', 'D', 6, 10, getFlows, 1);
   assert.ok(!capped.found && capped.limitReached && calls === 1); // expansion cap respected
+
+  // --- risk scoring (plan.md §5) ---
+  const fl = (address: string, vol: number) => ({ address, in: vol, out: 0, inCount: 1, outCount: 0 });
+  const labels: Record<string, { name: string; category: string }[]> = {
+    SCAM: [{ name: 'Pig-butchering ring', category: 'scam' }],
+    EXCH: [{ name: 'Big Exchange', category: 'exchange' }],
+    BAD: [{ name: 'Mixer', category: 'mixer' }, { name: 'OFAC SDN list', category: 'sanctioned' }],
+  };
+  const labelsOf = (a: string) => labels[a] ?? [];
+  const clean = scoreRisk({ own: [], frozen: false, flows: [fl('X', 100), fl('Y', 50)], labelsOf });
+  assert.equal(clean.score, 0);
+  assert.equal(clean.level, 'low');
+  assert.equal(scoreRisk({ own: [{ name: 'OFAC SDN list', category: 'sanctioned' }], frozen: false, flows: [], labelsOf }).score, 100);
+  assert.equal(scoreRisk({ own: [], frozen: true, flows: [], labelsOf }).level, 'severe');
+  const tenPct = scoreRisk({ own: [], frozen: false, flows: [fl('SCAM', 10), fl('X', 90)], labelsOf });
+  assert.equal(tenPct.score, 9); // 90 weight × 10 % volume
+  assert.ok(tenPct.reasons[0].includes('SCAM'));
+  assert.equal(scoreRisk({ own: [], frozen: false, flows: [fl('EXCH', 100)], labelsOf }).score, 0); // exchanges are informational
+  assert.equal(scoreRisk({ own: [], frozen: false, flows: [fl('BAD', 50), fl('X', 50)], labelsOf }).score, 50); // highest label wins: 100 × 50 %
+  const ind = scoreRisk({ own: [], frozen: false, flows: [fl('X', 100)], labelsOf, indirect: [{ address: 'X', share: 1, directScore: 60 }] });
+  assert.equal(ind.score, 30); // 60 × 100 % × 0.5 discount
+  assert.equal(level(75), 'severe');
+  assert.equal(level(40), 'high');
+  assert.equal(level(15), 'medium');
+  assert.equal(level(14.9), 'low');
+
+  // --- CSV ---
+  assert.deepEqual(parseCsv('a,b\r\n"x, y","he said ""hi"""\n\n'), [['a', 'b'], ['x, y', 'he said "hi"']]);
+  assert.equal(toCsv([['=cmd()', -5, 'ok']]), `"'=cmd()","-5","ok"\r\n`); // formula injection neutralised, numbers kept
 
   console.log('selfcheck: all passed');
 }

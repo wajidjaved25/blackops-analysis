@@ -64,17 +64,22 @@ const TTL = 5 * 60_000;
 const tails = new Map<string, Promise<void>>();
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-/** Cached fetch, serialized per host with a gap to respect free-tier rate limits. */
-async function fetchJson(url: string, init: RequestInit = {}, gapMs = 250): Promise<any> {
+/** Cached fetch, serialized per host with a gap to respect free-tier rate limits. `fresh` skips the cache read. */
+async function fetchJson(url: string, init: RequestInit = {}, gapMs = 250, fresh = false): Promise<any> {
   const key = url + (init.body ?? '');
   const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < TTL) return hit.data;
+  if (!fresh && hit && Date.now() - hit.at < TTL) return hit.data;
   const host = new URL(url).host;
   const wait = tails.get(host) ?? Promise.resolve();
   tails.set(host, wait.then(() => sleep(gapMs)));
   await wait;
-  const res = await fetch(url, init);
-  if (!res.ok) throw new BadGatewayException(`${host} returned HTTP ${res.status}`);
+  let res = await fetch(url, init);
+  // Free tiers rate-limit bursts: back off 1s, 2s, 4s, 8s before giving up.
+  for (let i = 0; (res.status === 429 || res.status === 503) && i < 4; i++) {
+    await sleep(1000 * 2 ** i);
+    res = await fetch(url, init);
+  }
+  if (!res.ok) throw new BadGatewayException(`${host} returned HTTP ${res.status}${res.status === 429 ? ' (rate limited — add an API key in backend/.env)' : ''}`);
   const data = await res.json();
   cache.set(key, { at: Date.now(), data });
   return data;
@@ -87,12 +92,12 @@ function tronHeaders(): Record<string, string> {
 }
 const tronGap = () => (process.env.TRONGRID_API_KEY ? 80 : 350);
 
-async function tronTransfers(addr: string, max: number): Promise<Transfer[]> {
+async function tronTransfers(addr: string, max: number, fresh = false): Promise<Transfer[]> {
   const out: Transfer[] = [];
   let url: string | undefined =
     `${TRONGRID}/v1/accounts/${addr}/transactions/trc20?only_confirmed=true&limit=200&contract_address=${TRON_USDT}`;
   while (url && out.length < max) {
-    const j = await fetchJson(url, { headers: tronHeaders() }, tronGap());
+    const j = await fetchJson(url, { headers: tronHeaders() }, tronGap(), fresh);
     for (const t of j.data ?? []) {
       out.push({ hash: t.transaction_id, from: t.from, to: t.to, amount: Number(t.value) / 1e6, timestamp: t.block_timestamp });
     }
@@ -125,10 +130,12 @@ async function tronFrozen(addr: string): Promise<boolean> {
 }
 
 // ---------- Ethereum (ERC20) ----------
-async function etherscan(params: string): Promise<any> {
+export const hasEtherscanKey = () => !!process.env.ETHERSCAN_API_KEY;
+
+async function etherscan(params: string, fresh = false): Promise<any> {
   const key = process.env.ETHERSCAN_API_KEY;
   if (!key) throw new BadRequestException('ETHERSCAN_API_KEY is not set in backend/.env — needed for ERC20 addresses');
-  const j = await fetchJson(`${ETHERSCAN}&${params}&apikey=${key}`, {}, 220);
+  const j = await fetchJson(`${ETHERSCAN}&${params}&apikey=${key}`, {}, 220, fresh);
   if (j.error) throw new BadGatewayException(`Etherscan: ${j.error.message ?? JSON.stringify(j.error)}`);
   if (j.status === '0' && !/no transactions/i.test(j.message ?? '')) {
     throw new BadGatewayException(`Etherscan: ${typeof j.result === 'string' ? j.result : j.message}`);
@@ -136,10 +143,11 @@ async function etherscan(params: string): Promise<any> {
   return j.result;
 }
 
-async function ethTransfers(addr: string, max: number): Promise<Transfer[]> {
+async function ethTransfers(addr: string, max: number, fresh = false): Promise<Transfer[]> {
   // ponytail: one page only (Etherscan caps page*offset at 10k). Paginate by block range for whale wallets.
   const rows = await etherscan(
     `module=account&action=tokentx&contractaddress=${ETH_USDT}&address=${addr}&page=1&offset=${Math.min(max, 10000)}&sort=desc`,
+    fresh,
   );
   return (Array.isArray(rows) ? rows : []).map((t: any) => ({
     hash: t.hash,
@@ -209,9 +217,57 @@ async function ethTx(hash: string): Promise<TxDetail> {
   };
 }
 
+// ---------- Tether freeze events ----------
+export const FREEZE_TOPICS = {
+  added: '42e160154868087d6bfdc0ca23d96a1c1cfa32f1b72ba9ba27b69b98a0d819dc', // AddedBlackList(address)
+  removed: 'd7e9ec6e6ecd65492dce6bf513cd6867560d49544421d0783ddf06e76c24470c', // RemovedBlackList(address)
+};
+export interface FreezeEvent {
+  address: string;
+  added: boolean;
+  ts: number; // ms (Tron) or block number (Eth) — used only as a sync cursor
+}
+
+/** All Tron freeze + unfreeze events at or after `minTs`, merged oldest first. */
+export async function tronFreezeEvents(minTs: number, maxPages = 100): Promise<FreezeEvent[]> {
+  const events: FreezeEvent[] = [];
+  for (const name of ['AddedBlackList', 'RemovedBlackList']) {
+    let url: string | undefined =
+      `${TRONGRID}/v1/contracts/${TRON_USDT}/events?event_name=${name}&only_confirmed=true&order_by=block_timestamp,asc&limit=200&min_block_timestamp=${minTs}`;
+    for (let p = 0; url && p < maxPages; p++) {
+      const j = await fetchJson(url, { headers: tronHeaders() }, tronGap(), true);
+      for (const e of j.data ?? []) {
+        const raw = e.result?._user ?? e.result?.['0'];
+        if (raw) events.push({ address: hexToTron(raw), added: name === 'AddedBlackList', ts: e.block_timestamp });
+      }
+      url = j.meta?.links?.next;
+    }
+  }
+  return events.sort((a, b) => a.ts - b.ts);
+}
+
+/** Ethereum freeze events from `fromBlock` (one Etherscan page per kind, merged oldest first). */
+export async function ethFreezeEvents(fromBlock: number): Promise<{ events: FreezeEvent[]; full: boolean }> {
+  const page = async (topic: string, added: boolean) => {
+    const rows = await etherscan(`module=logs&action=getLogs&address=${ETH_USDT}&topic0=0x${topic}&fromBlock=${fromBlock}&toBlock=latest&page=1&offset=1000`, true);
+    return (Array.isArray(rows) ? rows : []).map((l: any) => ({
+      // Ethereum USDT emits the address as non-indexed data; handle indexed too for safety.
+      address: '0x' + (l.topics?.[1] ?? l.data).slice(-40).toLowerCase(),
+      added,
+      ts: Number(l.blockNumber),
+      idx: Number(l.logIndex),
+    }));
+  };
+  const a = await page(FREEZE_TOPICS.added, true);
+  const r = await page(FREEZE_TOPICS.removed, false);
+  const events = [...a, ...r].sort((x, y) => x.ts - y.ts || x.idx - y.idx);
+  return { events, full: a.length === 1000 || r.length === 1000 };
+}
+
 // ---------- Public API ----------
 export const getTx = (c: Chain, hash: string) => (c === 'tron' ? tronTx(hash) : ethTx(hash.toLowerCase()));
-export const getTransfers = (c: Chain, a: string, max = 200) => (c === 'tron' ? tronTransfers(a, max) : ethTransfers(a, max));
+export const getTransfers = (c: Chain, a: string, max = 200, fresh = false) =>
+  c === 'tron' ? tronTransfers(a, max, fresh) : ethTransfers(a, max, fresh);
 export const getBalance = (c: Chain, a: string) => (c === 'tron' ? tronBalance(a) : ethBalance(a));
 export const isTetherFrozen = (c: Chain, a: string) => (c === 'tron' ? tronFrozen(a) : ethFrozen(a));
 
