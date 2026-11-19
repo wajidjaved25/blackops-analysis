@@ -1,0 +1,25 @@
+# Caddy obtains and renews the HTTPS certificate for {$DOMAIN} automatically (ports 80 and 443 must be reachable).
+# Use DOMAIN=localhost to try the stack locally with Caddy's internal certificate.
+{$DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+
+	# Case file uploads are up to 20 MB; graph snapshots up to ~12 MB.
+	request_body {
+		max_size 25MB
+	}
+
+	handle /api/* {
+		reverse_proxy backend:4000
+	}
+	handle {
+		reverse_proxy frontend:3000
+	}
+}

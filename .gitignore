@@ -3,3 +3,6 @@ dist
 .next
 *.tsbuildinfo
 .env
+backend/uploads/
+uploads/
+backups/

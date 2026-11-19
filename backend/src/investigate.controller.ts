@@ -1,9 +1,9 @@
 import { BadRequestException, Controller, Get, Param, Query, Res } from '@nestjs/common';
 import type { Response } from 'express';
-import { CurrentCtx } from './auth';
+import { CurrentCtx, Perm } from './auth';
 import { Chain, flows, getBalance, getTransfers, getTx, isTxHash, norm, Transfer } from './chains';
 import { audit, Ctx, Db } from './db';
-import { buildGraph, findPath, GetFlows, GraphNode } from './graph';
+import { buildGraph, findPath, GetFlows, GraphNode, withVolumes } from './graph';
 import { LabelsService } from './labels';
 import { RiskService } from './risk';
 import { topLabel } from './risk-score';
@@ -27,8 +27,8 @@ interface Filter {
 const applyFilter = (ts: Transfer[], f: Filter) =>
   ts.filter((t) => (f.from === undefined || t.timestamp >= f.from) && (f.to === undefined || t.timestamp <= f.to) && (f.min === undefined || t.amount >= f.min));
 
-function flowsFor(chain: Chain, f: Filter): GetFlows {
-  return async (a) => flows(a, applyFilter(await getTransfers(chain, a, PER_NODE), f));
+function flowsFor(chain: Chain, f: Filter, withTransfers: boolean): GetFlows {
+  return async (a) => flows(a, applyFilter(await getTransfers(chain, a, PER_NODE), f), withTransfers);
 }
 
 @Controller()
@@ -77,12 +77,14 @@ export class InvestigateController {
     };
   }
 
+  @Perm('investigate.view')
   @Get('address/:addr')
   address(@CurrentCtx() ctx: Ctx, @Param('addr') raw: string, @Query('limit') limitRaw?: string) {
     const { chain, addr } = parseAddr(raw);
     return this.summary(chain, addr, int(limitRaw, 1000, 1, 2000), ctx.orgId);
   }
 
+  @Perm('export.data')
   @Get('address/:addr/report.csv')
   async addressCsv(@CurrentCtx() ctx: Ctx, @Param('addr') raw: string, @Res() res: Response) {
     const { chain, addr } = parseAddr(raw);
@@ -109,6 +111,7 @@ export class InvestigateController {
     res.send(toCsv(rows));
   }
 
+  @Perm('investigate.view')
   @Get('tx/:chain/:hash')
   tx(@Param('chain') chain: string, @Param('hash') hash: string) {
     if (chain !== 'tron' && chain !== 'eth') throw new BadRequestException('chain must be "tron" or "eth"');
@@ -116,6 +119,7 @@ export class InvestigateController {
     return getTx(chain, hash);
   }
 
+  @Perm('investigate.view')
   @Get('graph/:addr')
   async graph(
     @CurrentCtx() ctx: Ctx,
@@ -125,21 +129,26 @@ export class InvestigateController {
     @Query('from') from?: string,
     @Query('to') to?: string,
     @Query('min') min?: string,
+    @Query('transfers') transfers?: string,
   ) {
     const { chain, addr } = parseAddr(raw);
     const filter = { from: time(from), to: time(to), min: min ? Number(min) : undefined };
     if (filter.min !== undefined && Number.isNaN(filter.min)) throw new BadRequestException('min must be a number');
-    const g = await buildGraph(addr, int(depth, 1, 1, 3), int(fanout, 8, 1, 15), flowsFor(chain, filter));
-    return { chain, nodes: await this.labelNodes(chain, g.nodes, ctx.orgId), edges: g.edges };
+    const withT = transfers === 'true';
+    const g = await buildGraph(addr, int(depth, 1, 1, 3), int(fanout, 8, 1, 15), flowsFor(chain, filter, withT));
+    const nodes = await this.labelNodes(chain, withT ? withVolumes(g.nodes, g.edges) : g.nodes, ctx.orgId);
+    return { chain, nodes, edges: g.edges };
   }
 
+  @Perm('investigate.view')
   @Get('path')
-  async path(@CurrentCtx() ctx: Ctx, @Query('from') fromRaw: string, @Query('to') toRaw: string, @Query('maxHops') maxHops?: string, @Query('fanout') fanout?: string) {
+  async path(@CurrentCtx() ctx: Ctx, @Query('from') fromRaw: string, @Query('to') toRaw: string, @Query('maxHops') maxHops?: string, @Query('fanout') fanout?: string, @Query('transfers') transfers?: string) {
     const a = parseAddr(fromRaw);
     const b = parseAddr(toRaw);
     if (a.chain !== b.chain) throw new BadRequestException('Both addresses must be on the same chain');
     if (a.addr === b.addr) throw new BadRequestException('From and to are the same address');
-    const r = await findPath(a.addr, b.addr, int(maxHops, 4, 1, 6), int(fanout, 10, 1, 25), flowsFor(a.chain, {}));
-    return { chain: a.chain, ...r, nodes: await this.labelNodes(a.chain, r.nodes, ctx.orgId) };
+    const withT = transfers === 'true';
+    const r = await findPath(a.addr, b.addr, int(maxHops, 4, 1, 6), int(fanout, 10, 1, 25), flowsFor(a.chain, {}, withT));
+    return { chain: a.chain, ...r, nodes: await this.labelNodes(a.chain, withT ? withVolumes(r.nodes, r.edges) : r.nodes, ctx.orgId) };
   }
 }

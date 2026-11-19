@@ -1,5 +1,6 @@
 import { BadRequestException, BadGatewayException, NotFoundException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
+import { cacheGet, cacheSet } from './kv';
 
 export type Chain = 'tron' | 'eth';
 export interface Transfer {
@@ -9,13 +10,21 @@ export interface Transfer {
   amount: number; // USDT, 6 decimals applied
   timestamp: number; // ms
 }
+export interface TransferRef {
+  hash: string;
+  amount: number;
+  timestamp: number;
+}
 export interface Flow {
   address: string;
   in: number;
   out: number;
   inCount: number;
   outCount: number;
+  inTransfers?: TransferRef[]; // only with flows(..., true): newest first, max MAX_EDGE_TRANSFERS
+  outTransfers?: TransferRef[];
 }
+export const MAX_EDGE_TRANSFERS = 50;
 
 const TRON_USDT = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t';
 const ETH_USDT = '0xdac17f958d2ee523a2206206994597c13d831ec7';
@@ -58,17 +67,17 @@ export function isTxHash(chain: Chain, hash: string): boolean {
   return chain === 'tron' ? /^[0-9a-fA-F]{64}$/.test(hash) : /^0x[0-9a-fA-F]{64}$/.test(hash);
 }
 
-// ponytail: in-memory cache, unbounded and lost on restart. Move to Redis if it grows or you run >1 instance.
-const cache = new Map<string, { at: number; data: any }>();
-const TTL = 5 * 60_000;
+const TTL_SEC = 300; // cache lives in Redis (kv.ts), memory fallback if Redis is down
 const tails = new Map<string, Promise<void>>();
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /** Cached fetch, serialized per host with a gap to respect free-tier rate limits. `fresh` skips the cache read. */
 async function fetchJson(url: string, init: RequestInit = {}, gapMs = 250, fresh = false): Promise<any> {
   const key = url + (init.body ?? '');
-  const hit = cache.get(key);
-  if (!fresh && hit && Date.now() - hit.at < TTL) return hit.data;
+  if (!fresh) {
+    const hit = await cacheGet(key);
+    if (hit !== undefined) return hit;
+  }
   const host = new URL(url).host;
   const wait = tails.get(host) ?? Promise.resolve();
   tails.set(host, wait.then(() => sleep(gapMs)));
@@ -81,7 +90,7 @@ async function fetchJson(url: string, init: RequestInit = {}, gapMs = 250, fresh
   }
   if (!res.ok) throw new BadGatewayException(`${host} returned HTTP ${res.status}${res.status === 429 ? ' (rate limited — add an API key in backend/.env)' : ''}`);
   const data = await res.json();
-  cache.set(key, { at: Date.now(), data });
+  await cacheSet(key, data, TTL_SEC);
   return data;
 }
 
@@ -272,7 +281,7 @@ export const getBalance = (c: Chain, a: string) => (c === 'tron' ? tronBalance(a
 export const isTetherFrozen = (c: Chain, a: string) => (c === 'tron' ? tronFrozen(a) : ethFrozen(a));
 
 /** Aggregate transfers by counterparty, sorted by total volume desc. */
-export function flows(addr: string, transfers: Transfer[]): Flow[] {
+export function flows(addr: string, transfers: Transfer[], withTransfers = false): Flow[] {
   const me = norm(addr);
   const m = new Map<string, Flow>();
   for (const t of transfers) {
@@ -287,7 +296,18 @@ export function flows(addr: string, transfers: Transfer[]): Flow[] {
       f.out += t.amount;
       f.outCount++;
     }
+    if (withTransfers) {
+      const key = incoming ? 'inTransfers' : 'outTransfers';
+      (f[key] ??= []).push({ hash: t.hash, amount: t.amount, timestamp: t.timestamp });
+    }
     m.set(other, f);
+  }
+  if (withTransfers) {
+    const newest = (a: TransferRef, b: TransferRef) => b.timestamp - a.timestamp;
+    for (const f of m.values()) {
+      f.inTransfers = f.inTransfers?.sort(newest).slice(0, MAX_EDGE_TRANSFERS);
+      f.outTransfers = f.outTransfers?.sort(newest).slice(0, MAX_EDGE_TRANSFERS);
+    }
   }
   return [...m.values()].sort((a, b) => b.in + b.out - (a.in + a.out));
 }

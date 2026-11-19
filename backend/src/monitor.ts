@@ -2,13 +2,13 @@ import { BadRequestException, Body, Controller, Delete, Get, Injectable, Logger,
 import { Alert, Prisma } from '@prisma/client';
 import { createHmac, randomBytes } from 'node:crypto';
 import nodemailer from 'nodemailer';
-import { CurrentCtx, Roles } from './auth';
+import { CurrentCtx, Perm } from './auth';
 import { Chain, getTransfers } from './chains';
 import { audit, Ctx, Db } from './db';
 import { Jobs } from './jobs';
 import { LabelsService } from './labels';
 import { evaluateRules, RULE_TYPES, ruleParams } from './monitor-rules';
-import { extractAddresses, found, id, int, oneOf, str } from './util';
+import { assertPublicUrl, extractAddresses, found, id, int, oneOf, str } from './util';
 
 const ALERT_STATUSES = ['open', 'reviewing', 'closed'] as const;
 
@@ -36,7 +36,9 @@ export class Notifier {
   async webhook(url: string, secret: string, payload: object) {
     const body = JSON.stringify(payload);
     try {
+      await assertPublicUrl(url);
       const r = await fetch(url, {
+        redirect: 'manual', // a redirect could point at an internal address
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-usdt-trace-signature': 'sha256=' + createHmac('sha256', secret).update(body).digest('hex') },
         body,
@@ -147,6 +149,7 @@ export class MonitorController {
   }
 
   // ----- watchlists -----
+  @Perm('monitor.view')
   @Get('watchlists')
   async lists(@CurrentCtx() ctx: Ctx) {
     const rows = await this.db.watchlist.findMany({ where: { orgId: ctx.orgId }, include: { _count: { select: { items: true, rules: true } } }, orderBy: { id: 'desc' } });
@@ -158,6 +161,7 @@ export class MonitorController {
     return rows.map((r) => ({ id: r.id, name: r.name, createdAt: r.createdAt, items: r._count.items, rules: r._count.rules, openAlerts: openBy.get(r.id) ?? 0 }));
   }
 
+  @Perm('monitor.manage')
   @Post('watchlists')
   async createList(@CurrentCtx() ctx: Ctx, @Body() b: any) {
     const w = await this.db.watchlist.create({ data: { orgId: ctx.orgId, name: str(b.name, 'name', { max: 100 }) } });
@@ -165,6 +169,7 @@ export class MonitorController {
     return w;
   }
 
+  @Perm('monitor.view')
   @Get('watchlists/:id')
   async getList(@CurrentCtx() ctx: Ctx, @Param('id') raw: string) {
     const w = await this.own(ctx, id(raw));
@@ -175,6 +180,7 @@ export class MonitorController {
     return { ...w, items: items.map(item), rules };
   }
 
+  @Perm('monitor.manage')
   @Delete('watchlists/:id')
   async deleteList(@CurrentCtx() ctx: Ctx, @Param('id') raw: string) {
     const w = await this.own(ctx, id(raw));
@@ -185,6 +191,7 @@ export class MonitorController {
 
   // ----- items -----
   /** Body: { addresses: string[] } or { csv }, optional note. */
+  @Perm('monitor.manage')
   @Post('watchlists/:id/items')
   async addItems(@CurrentCtx() ctx: Ctx, @Param('id') raw: string, @Body() b: any) {
     const w = await this.own(ctx, id(raw));
@@ -195,6 +202,7 @@ export class MonitorController {
     return { added: r.count, skipped: addrs.length - r.count };
   }
 
+  @Perm('monitor.manage')
   @Delete('watch-items/:id')
   async removeItem(@CurrentCtx() ctx: Ctx, @Param('id') raw: string) {
     const r = await this.db.watchItem.deleteMany({ where: { id: id(raw), watchlist: { orgId: ctx.orgId } } });
@@ -203,6 +211,7 @@ export class MonitorController {
   }
 
   // ----- rules -----
+  @Perm('monitor.manage')
   @Post('watchlists/:id/rules')
   async addRule(@CurrentCtx() ctx: Ctx, @Param('id') raw: string, @Body() b: any) {
     const w = await this.own(ctx, id(raw));
@@ -218,6 +227,7 @@ export class MonitorController {
     return r;
   }
 
+  @Perm('monitor.manage')
   @Patch('rules/:id')
   async updateRule(@CurrentCtx() ctx: Ctx, @Param('id') raw: string, @Body() b: any) {
     const r = found(await this.db.rule.findFirst({ where: { id: id(raw), watchlist: { orgId: ctx.orgId } } }), 'Rule not found');
@@ -233,6 +243,7 @@ export class MonitorController {
     return this.db.rule.update({ where: { id: r.id }, data });
   }
 
+  @Perm('monitor.manage')
   @Delete('rules/:id')
   async deleteRule(@CurrentCtx() ctx: Ctx, @Param('id') raw: string) {
     const r = await this.db.rule.deleteMany({ where: { id: id(raw), watchlist: { orgId: ctx.orgId } } });
@@ -241,6 +252,7 @@ export class MonitorController {
   }
 
   // ----- alerts -----
+  @Perm('monitor.view')
   @Get('alerts')
   async alerts(@CurrentCtx() ctx: Ctx, @Query('status') status?: string, @Query('watchlistId') wl?: string, @Query('page') page?: string) {
     const p = int(page, 0, 0, 10000);
@@ -256,6 +268,7 @@ export class MonitorController {
     return { rows, total, page: p, pageSize: 50 };
   }
 
+  @Perm('alerts.triage')
   @Patch('alerts/:id')
   async updateAlert(@CurrentCtx() ctx: Ctx, @Param('id') raw: string, @Body() b: any) {
     const status = oneOf(b.status, 'status', ALERT_STATUSES);
@@ -266,31 +279,33 @@ export class MonitorController {
   }
 
   /** Runs one monitoring pass for this org now (normally automatic every MONITOR_INTERVAL_SEC). */
+  @Perm('monitor.manage')
   @Post('monitor/run')
   run(@CurrentCtx() ctx: Ctx) {
     return this.monitor.poll(ctx.orgId);
   }
 
   // ----- notification targets -----
-  @Roles('admin')
+  @Perm('notify.manage')
   @Get('notify-targets')
-  targets(@CurrentCtx() ctx: Ctx) {
-    return this.db.notifyTarget.findMany({ where: { orgId: ctx.orgId }, orderBy: { id: 'asc' } });
+  async targets(@CurrentCtx() ctx: Ctx) {
+    const rows = await this.db.notifyTarget.findMany({ where: { orgId: ctx.orgId }, orderBy: { id: 'asc' } });
+    return rows.map(({ secret, ...t }) => t); // the webhook secret is shown once, when the target is created
   }
 
-  @Roles('admin')
+  @Perm('notify.manage')
   @Post('notify-targets')
   async addTarget(@CurrentCtx() ctx: Ctx, @Body() b: any) {
     const type = oneOf(b.type, 'type', ['email', 'webhook'] as const);
     const target = str(b.target, 'target', { max: 500 });
     if (type === 'email' && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(target)) throw new BadRequestException('Invalid email address');
-    if (type === 'webhook' && !/^https?:\/\//.test(target)) throw new BadRequestException('Webhook URL must start with http:// or https://');
+    if (type === 'webhook') await assertPublicUrl(target);
     const t = await this.db.notifyTarget.create({ data: { orgId: ctx.orgId, type, target, secret: type === 'webhook' ? randomBytes(24).toString('hex') : null } });
     await audit(this.db, ctx, 'notify.create', `notify:${t.id}`, { type, target });
     return t;
   }
 
-  @Roles('admin')
+  @Perm('notify.manage')
   @Delete('notify-targets/:id')
   async removeTarget(@CurrentCtx() ctx: Ctx, @Param('id') raw: string) {
     const r = await this.db.notifyTarget.deleteMany({ where: { id: id(raw), orgId: ctx.orgId } });
@@ -299,7 +314,7 @@ export class MonitorController {
   }
 
   /** Sends a sample alert to one target so admins can verify delivery. */
-  @Roles('admin')
+  @Perm('notify.manage')
   @Post('notify-targets/:id/test')
   async testTarget(@CurrentCtx() ctx: Ctx, @Param('id') raw: string) {
     const t = found(await this.db.notifyTarget.findFirst({ where: { id: id(raw), orgId: ctx.orgId } }), 'Target not found');

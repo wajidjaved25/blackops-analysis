@@ -1,5 +1,5 @@
 import { Controller, Get, Injectable, Param, Query } from '@nestjs/common';
-import { ApiKeyAuth, CurrentCtx } from './auth';
+import { ApiKeyAuth, CurrentCtx, Perm } from './auth';
 import { Chain, flows, getTransfers, isTetherFrozen, Transfer } from './chains';
 import { Ctx } from './db';
 import { LabelLite, LabelsService } from './labels';
@@ -51,6 +51,7 @@ export class RiskService {
 export class RiskController {
   constructor(private risk: RiskService) {}
 
+  @Perm('investigate.view')
   @Get('risk/:addr')
   risk_(@CurrentCtx() ctx: Ctx, @Param('addr') raw: string) {
     const { chain, addr } = parseAddr(raw);

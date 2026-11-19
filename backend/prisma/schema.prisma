@@ -10,29 +10,59 @@ datasource db {
 // ---------- Platform (Phase 6) ----------
 
 model Org {
-  id        Int      @id @default(autoincrement())
-  name      String
-  createdAt DateTime @default(now())
-  users     User[]
+  id          Int      @id @default(autoincrement())
+  name        String
+  require2fa  Boolean  @default(false)
+  sessionDays Int      @default(14)
+  createdAt   DateTime @default(now())
+  users       User[]
+  roles       Role[]
+}
+
+/// System roles (Owner/Admin/Analyst/Viewer) are code-defined and re-synced at boot; custom roles are editable.
+model Role {
+  id          Int      @id @default(autoincrement())
+  orgId       Int
+  org         Org      @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  name        String
+  description String   @default("")
+  system      Boolean  @default(false)
+  permissions String[]
+  createdAt   DateTime @default(now())
+  users       User[]
+
+  @@unique([orgId, name])
 }
 
 model User {
-  id           Int       @id @default(autoincrement())
-  orgId        Int
-  org          Org       @relation(fields: [orgId], references: [id])
-  email        String    @unique
-  name         String
-  passwordHash String
-  role         String    @default("analyst") // admin | analyst | viewer
-  createdAt    DateTime  @default(now())
-  sessions     Session[]
+  id                 Int       @id @default(autoincrement())
+  orgId              Int
+  org                Org       @relation(fields: [orgId], references: [id])
+  roleId             Int
+  role               Role      @relation(fields: [roleId], references: [id])
+  email              String    @unique
+  name               String
+  passwordHash       String
+  status             String    @default("active") // active | disabled
+  mustChangePassword Boolean   @default(false)
+  totpSecret         String? // sealed (see totp.ts); set while enrolling, active once totpEnabled
+  totpEnabled        Boolean   @default(false)
+  totpLastStep       Int       @default(0) // blocks replay of a used code
+  recoveryCodes      String[] // sha256 hashes, one-time
+  lastLoginAt        DateTime?
+  createdAt          DateTime  @default(now())
+  sessions           Session[]
 }
 
 model Session {
-  id        String   @id // sha256 of the cookie token
-  userId    Int
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  expiresAt DateTime
+  id         String   @id // sha256 of the cookie token
+  userId     Int
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  ip         String?
+  userAgent  String?
+  expiresAt  DateTime
 }
 
 model ApiKey {
@@ -45,6 +75,7 @@ model ApiKey {
   usageCount      Int       @default(0)
   lastUsedAt      DateTime?
   revokedAt       DateTime?
+  createdById     Int?
   createdAt       DateTime  @default(now())
 }
 
@@ -55,6 +86,7 @@ model AuditLog {
   action    String // e.g. case.create, case.export, label.delete
   target    String
   detail    Json?
+  ip        String?
   createdAt DateTime @default(now())
 
   @@index([orgId, createdAt])

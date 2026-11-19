@@ -12,9 +12,10 @@ export class Db extends PrismaClient implements OnModuleInit {
 export interface Ctx {
   orgId: number;
   userId: number | null;
-  role: 'admin' | 'analyst' | 'viewer' | 'api';
+  permissions: string[]; // empty for API-key requests
+  ip?: string;
 }
 
 export function audit(db: Db, ctx: Ctx, action: string, target: string, detail?: object) {
-  return db.auditLog.create({ data: { orgId: ctx.orgId, userId: ctx.userId, action, target, detail: detail as any } });
+  return db.auditLog.create({ data: { orgId: ctx.orgId, userId: ctx.userId, action, target, detail: detail as any, ip: ctx.ip } });
 }

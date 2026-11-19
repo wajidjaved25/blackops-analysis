@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Injectable, OnModuleInit, Param, Post, Res } from '@nestjs/common';
 import type { Response } from 'express';
-import { CurrentCtx } from './auth';
+import { CurrentCtx, Perm } from './auth';
 import { Chain } from './chains';
 import { audit, Ctx, Db } from './db';
 import { Jobs } from './jobs';
@@ -62,6 +62,7 @@ export class ScreenController {
   ) {}
 
   /** Body: { addresses: string[] } or { csv: "…" } (any cell that is an address is used). Max 1000. */
+  @Perm('screen.run')
   @Post()
   async create(@CurrentCtx() ctx: Ctx, @Body() b: any) {
     const items = extractAddresses(b, MAX);
@@ -70,6 +71,7 @@ export class ScreenController {
     return { id: job.id, total: items.length };
   }
 
+  @Perm('investigate.view')
   @Get()
   async list(@CurrentCtx() ctx: Ctx) {
     const jobs = await this.db.job.findMany({
@@ -81,12 +83,14 @@ export class ScreenController {
     return jobs.map(({ payload, ...j }) => ({ ...j, name: (payload as any).name ?? '' }));
   }
 
+  @Perm('investigate.view')
   @Get(':id')
   async get(@CurrentCtx() ctx: Ctx, @Param('id') raw: string) {
     const j = found(await this.db.job.findFirst({ where: { id: id(raw), orgId: ctx.orgId, type: 'screen' } }), 'Screening job not found');
     return { id: j.id, status: j.status, progress: j.progress, total: j.total, error: j.error, rows: (j.result as any)?.rows ?? [] };
   }
 
+  @Perm('export.data')
   @Get(':id/csv')
   async csv(@CurrentCtx() ctx: Ctx, @Param('id') raw: string, @Res() res: Response) {
     const j = found(await this.db.job.findFirst({ where: { id: id(raw), orgId: ctx.orgId, type: 'screen' } }), 'Screening job not found');

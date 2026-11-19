@@ -1,4 +1,6 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { lookup } from 'node:dns/promises';
+import { isIPv4, isIPv6 } from 'node:net';
 import { Chain, detectChain, norm } from './chains';
 
 export function parseAddr(raw: unknown): { chain: Chain; addr: string } {
@@ -90,4 +92,39 @@ export function extractAddresses(input: { addresses?: unknown; csv?: unknown }, 
   if (!out.length) throw new BadRequestException('No valid addresses found');
   if (out.length > max) throw new BadRequestException(`Too many addresses (${out.length}); max ${max} per request`);
   return out;
+}
+
+export function privateIp(ip: string): boolean {
+  if (isIPv6(ip)) {
+    const l = ip.toLowerCase();
+    const mapped = l.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+    return mapped ? privateIp(mapped[1]) : l === '::1' || l === '::' || /^f[cd]/.test(l) || l.startsWith('fe80');
+  }
+  const [a, b] = ip.split('.').map(Number);
+  return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+}
+
+/**
+ * SSRF guard for URLs users give us (webhooks, label import): http(s) only, and the host must not resolve to a
+ * private/loopback address. ALLOW_PRIVATE_URLS=true switches this off (local development only).
+ * ponytail: resolves once here and fetch resolves again, so DNS rebinding is not covered; pin the IP if that matters.
+ */
+export async function assertPublicUrl(raw: string): Promise<URL> {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    throw new BadRequestException('Invalid URL');
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new BadRequestException('URL must start with http:// or https://');
+  if (process.env.ALLOW_PRIVATE_URLS === 'true') return u;
+  const host = u.hostname.replace(/^\[|\]$/g, '');
+  let addrs: { address: string }[];
+  try {
+    addrs = isIPv4(host) || isIPv6(host) ? [{ address: host }] : await lookup(host, { all: true });
+  } catch {
+    throw new BadRequestException(`Cannot resolve host "${host}"`);
+  }
+  if (addrs.some((a) => privateIp(a.address))) throw new BadRequestException('URL points to a private or local address, which is not allowed');
+  return u;
 }
