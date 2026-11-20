@@ -40,6 +40,9 @@ export function planRead(cov: Coverage | null, max: number, fresh: boolean, now:
   const usable = wanted.every((a) => have.includes(a)) && (cov.status === 'complete' || (cov.status === 'capped' && max <= cov.rowCount));
   if (!usable) return 'api';
   const age = cov.lastSyncAt ? now - cov.lastSyncAt.getTime() : Infinity;
+  // Capped = service-scale wallet (thousands of transfers/hour): catching up synchronously took 97 s on a real exchange wallet.
+  // Its history is never complete anyway, so a stale read takes the newest page live (one call) instead.
+  if (cov.status === 'capped' && (fresh || age > freshMs)) return 'api';
   return fresh || age > freshMs ? 'sync-then-db' : 'db';
 }
 

@@ -283,6 +283,8 @@ ${PE1}`, 2).length, 2); // cap
   assert.equal(planRead({ status: 'complete', rowCount: 1, lastSyncAt: null, assets: 'usdt' }, 200, false, tnow, 300_000), 'sync-then-db'); // never synced
   assert.equal(planRead(cov('capped', 50_000), 2000, false, tnow, 300_000), 'db'); // capped holds the newest N: enough for small reads
   assert.equal(planRead(cov('capped', 1000), 2000, false, tnow, 300_000), 'api'); // ...not for reads wanting more than it holds
+  assert.equal(planRead(cov('capped', 50_000, 400_000), 200, false, tnow, 300_000), 'api'); // stale capped (exchange-scale): newest page live, never a synchronous catch-up
+  assert.equal(planRead(cov('capped', 50_000), 200, true, tnow, 300_000), 'api'); // monitoring on a capped wallet: live page
   // Etherscan-style newest-first batches: a full batch drops its possibly-cut oldest block and restarts there
   const eb = (block: number) => ({ block });
   assert.deepEqual(splitBoundary([eb(9), eb(9), eb(8), eb(7), eb(7)], true), { keep: [eb(9), eb(9), eb(8)], nextEnd: 7 });

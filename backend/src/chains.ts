@@ -215,7 +215,7 @@ async function etherscan(chain: 'eth' | 'bsc', params: string, fresh = false): P
   if (!key) throw new BadRequestException('ETHERSCAN_API_KEY is not set in backend/.env — needed for Ethereum and BNB Chain addresses');
   const j = await fetchJson(`https://api.etherscan.io/v2/api?chainid=${ETHERSCAN_CHAIN_ID[chain]}&${params}&apikey=${key}`, {}, 220, fresh);
   if (j.error) throw new BadGatewayException(`Etherscan: ${j.error.message ?? JSON.stringify(j.error)}`);
-  if (j.status === '0' && !/no transactions/i.test(j.message ?? '')) {
+  if (j.status === '0' && !/no (transactions|records) found/i.test(j.message ?? '')) {
     throw new BadGatewayException(`Etherscan: ${typeof j.result === 'string' ? j.result : j.message}`);
   }
   return j.result;
