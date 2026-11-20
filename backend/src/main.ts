@@ -23,10 +23,12 @@ async function bootstrap() {
   app.use(csrfGuard);
   app.setGlobalPrefix('api');
   app.useBodyParser('json', { limit: '12mb' }); // case graph snapshots and CSV imports
-  if (process.env.TRUST_PROXY === 'true') app.set('trust proxy', 1); // behind Caddy/nginx: real client IP for rate limits
+  // Real client IP for rate limits. 'true' = one proxy (Caddy); 'loopback' = Apache -> Next -> API on one host; or a hop count.
+  const tp = process.env.TRUST_PROXY;
+  if (tp && tp !== 'false') app.set('trust proxy', tp === 'true' ? 1 : /^\d+$/.test(tp) ? Number(tp) : tp);
   app.enableShutdownHooks();
   const port = Number(process.env.PORT ?? 4000);
-  await app.listen(port);
+  await app.listen(port, process.env.HOST || '0.0.0.0'); // HOST=127.0.0.1 behind Apache/nginx
   console.log(`API listening on http://localhost:${port}/api`);
 }
 bootstrap();
