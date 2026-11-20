@@ -15,6 +15,9 @@ import { useApi, useDebounced } from '@/lib/hooks';
 
 interface Label { id: number; orgId: number; chain: string; address: string; name: string; category: string; source: string; sourceUrl?: string | null; confidence?: number; createdAt: string }
 interface St { counts: Record<string, number>; ofacLastSync?: string; tetherLastSync?: string; circleLastSync?: string; etherscanKey?: boolean; categories: string[] }
+const EXCHANGES = ['Binance', 'OKX', 'Bybit', 'KuCoin', 'Bitget', 'HTX', 'Gate', 'Kraken', 'Coinbase'];
+// 8C source badges: official (vendor page) / explorer (Tronscan, Etherscan tags) / cluster (deposit attribution) / heuristic (not stored as a label).
+const sourceKind = (s: string) => (s === 'official' ? 'official' : s === 'tronscan' || s === 'etherscan' ? 'explorer' : s === 'cluster' ? 'cluster' : s);
 interface Dry { total: number; valid: number; errors: { line: number; address: string; error: string }[]; preview?: unknown[] }
 
 export default function Labels() {
@@ -23,10 +26,11 @@ export default function Labels() {
   const [q, setQ] = useState('');
   const [cat, setCat] = useState('');
   const [src, setSrc] = useState('');
+  const [exch, setExch] = useState('');
   const [page, setPage] = useState(0);
   const dq = useDebounced(q);
   const st = useApi<St>('/labels/status');
-  const list = useApi<{ rows: Label[]; total: number; pageSize: number }>(`/labels?q=${encodeURIComponent(dq)}&category=${cat}&source=${src}&page=${page}`);
+  const list = useApi<{ rows: Label[]; total: number; pageSize: number }>(`/labels?q=${encodeURIComponent(dq)}&category=${cat}&source=${src}&exchange=${exch}&page=${page}`);
   const [add, setAdd] = useState(false);
   const [imp, setImp] = useState<'csv' | 'url' | null>(null);
   const [del, setDel] = useState<Label | null>(null);
@@ -62,7 +66,8 @@ export default function Labels() {
         <Card flush title={<span className="row">
           <span style={{ position: 'relative' }}><Search size={14} style={{ position: 'absolute', left: 10, top: 8, color: 'var(--faint)' }} aria-hidden /><Input sm style={{ paddingLeft: 30, width: 240 }} placeholder="Search name or address" aria-label="Search labels" value={q} onChange={(e) => { setQ(e.target.value); setPage(0); }} /></span>
           <Select sm style={{ width: 150 }} aria-label="Category" value={cat} onChange={(e) => { setCat(e.target.value); setPage(0); }}><option value="">All categories</option>{(st.data?.categories ?? []).map((c) => <option key={c}>{c}</option>)}</Select>
-          <Select sm style={{ width: 130 }} aria-label="Source" value={src} onChange={(e) => { setSrc(e.target.value); setPage(0); }}><option value="">All sources</option>{['ofac', 'tether', 'circle', 'official', 'manual', 'import', 'cluster'].map((c) => <option key={c}>{c}</option>)}</Select>
+          <Select sm style={{ width: 130 }} aria-label="Source" value={src} onChange={(e) => { setSrc(e.target.value); setPage(0); }}><option value="">All sources</option>{['official', 'explorer', 'cluster', 'ofac', 'tether', 'circle', 'manual', 'import'].map((c) => <option key={c}>{c}</option>)}</Select>
+          <Select sm style={{ width: 140 }} aria-label="Exchange" value={exch} onChange={(e) => { setExch(e.target.value); setPage(0); }}><option value="">All exchanges</option>{EXCHANGES.map((c) => <option key={c}>{c}</option>)}</Select>
         </span>}>
           {list.loading ? <SkeletonRows /> : list.error ? <ErrorState error={list.error} status={list.status} onRetry={list.reload} /> : (
             <Table caption="Labels" rows={list.data?.rows ?? []} rowKey={(l) => l.id} pageSize={100} server={{ page, total: list.data?.total ?? 0, pageSize: list.data?.pageSize ?? 100, onPage: setPage }}
@@ -71,7 +76,7 @@ export default function Labels() {
                 { key: 'a', header: 'Address', cell: (l) => <AddressLink address={l.address} /> },
                 { key: 'n', header: 'Name', cell: (l) => <span style={{ fontWeight: 550 }}>{l.name}</span> },
                 { key: 'c', header: 'Category', cell: (l) => <CategoryChip category={l.category} /> },
-                { key: 's', header: 'Source', cell: (l) => <span className="row nw" style={{ gap: 6 }}><Badge tone="outline">{l.source}{l.orgId === 0 ? ' · global' : ''}</Badge>{l.sourceUrl && <a href={l.sourceUrl} target="_blank" rel="noreferrer" className="xs" title={l.sourceUrl}>source page</a>}</span> },
+                { key: 's', header: 'Source', cell: (l) => <span className="row nw" style={{ gap: 6 }}><Badge tone="outline">{l.source}{l.orgId === 0 ? ' · global' : ''}</Badge>{l.sourceUrl && <a href={l.sourceUrl} target="_blank" rel="noreferrer noopener" className="xs" title={l.sourceUrl}>source</a>}</span> },
                 { key: 'k', header: 'Conf.', num: true, cell: (l) => (l.confidence != null ? `${Math.round(l.confidence <= 1 ? l.confidence * 100 : l.confidence)}%` : '—') },
                 { key: 'x', header: '', cell: (l) => l.orgId !== 0 && manage ? <Button sm variant="ghost" icon aria-label={`Delete label ${l.name}`} onClick={() => setDel(l)}><Trash2 size={14} /></Button> : null },
               ]} />

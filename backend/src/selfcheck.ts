@@ -6,7 +6,8 @@ import { detectSwaps, selfCheckSwap } from './swap';
 import { detectChain, flows, parseTronTx, FrozenMap, frozenBy, hexToTron, isTxHash, norm, parseFreezeLog, Transfer, tronToHex20 } from './chains';
 import { buildGraph, findPath } from './graph';
 import { level, scoreRisk } from './risk-score';
-import { clusterConfidence, depositEvidence } from './cluster';
+import { autoAcceptDeposit, clusterConfidence, depositEvidence, exchangeName } from './cluster';
+import { isServiceScale, mapExplorerTag, parsePorList, pickTronscanTag, porName, SERVICE_SCALE_ROWS } from './exchange-labels';
 import { withVolumes } from './graph';
 import { planRead, retryDelayMs, splitBoundary, tailEnd, withSeq } from './index-rules';
 import { evaluateRules, ruleParams } from './monitor-rules';
@@ -214,6 +215,53 @@ async function main() {
   assert.equal(depositEvidence('TDep', deposit.slice(0, 2).concat(deposit.slice(3)), HOT), null); // only 2 depositors
   assert.equal(depositEvidence('TDep', [ct('U1', 'TDep', 5), ct('U2', 'TDep', 5), ct('U3', 'TDep', 5)], HOT), null); // never forwards anything
   assert.equal(depositEvidence('TDep', [ct(HOT, 'TDep', 5), ct('U2', 'TDep', 5), ct('U3', 'TDep', 5), ct('TDep', HOT, 10)], HOT), null); // the hot wallet itself is not a depositor
+
+  // --- 8C: auto-accept threshold (official hot wallet): >= 2 sweeps, or one sweep >= 95% of what was received ---
+  assert.equal(ev.sweeps, 1);
+  assert.equal(ev.sweepTx, 'TDepTHot99');
+  assert.ok(autoAcceptDeposit(ev)); // one sweep of 99 of 100 received (99%)
+  const twoSweeps = depositEvidence('TDep', [ct('U1', 'TDep', 50), ct('U2', 'TDep', 50), ct('U3', 'TDep', 50), ct('TDep', HOT, 60), ct('TDep', HOT, 80)], HOT)!;
+  assert.ok(twoSweeps.sweeps === 2 && autoAcceptDeposit(twoSweeps)); // 140 of 150 received, two sweeps
+  const weak = depositEvidence('TDep', [ct('U1', 'TDep', 50), ct('U2', 'TDep', 50), ct('U3', 'TDep', 50), ct('TDep', HOT, 140)], HOT)!;
+  assert.ok(weak.sweeps === 1 && !autoAcceptDeposit(weak)); // one sweep, 140/150 = 93% -> stays in the review queue
+  assert.ok(!autoAcceptDeposit({ hotWallet: HOT, outToHot: 99, totalOut: 100, depositors: 3 })); // pre-8C suggestion without sweep data
+  assert.equal(exchangeName(porName('Binance')), 'Binance');
+
+  // --- 8C: proof-of-reserves list parsers (synthetic samples; no exchange list was fetchable, so the shape is generic) ---
+  const PT1 = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t';
+  const PT2 = 'TSJEtPuqHpvSaVnSwvCsngaeBxrGUzp95Q';
+  const PE1 = '0xdAC17F958D2ee523a2206206994597C13D831ec7';
+  const BADCS = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6u'; // right shape, wrong checksum
+  const csvSample = `chain,address,balance
+TRC20,${PT1},1000.5
+ERC20,${PE1},20
+BTC,bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq,1
+TRC20,${BADCS},5
+TRC20,${PT1},1000.5
+`;
+  const csvOut = parsePorList(csvSample);
+  assert.deepEqual(csvOut, [{ chain: 'tron', address: PT1 }, { chain: 'eth', address: PE1.toLowerCase() }]); // dedupe, BTC ignored, bad checksum dropped
+  const jsonOut = parsePorList(JSON.stringify({ data: [{ chainName: 'Tron', address: PT2 }, { chainName: 'Ethereum', address: PE1.toLowerCase(), txid: 'a'.repeat(64) }] }));
+  assert.deepEqual(jsonOut.map((r) => r.address), [PT2, PE1.toLowerCase()]); // a 64-hex tx hash never matches
+  assert.deepEqual(parsePorList(`${PT1}
+${PT2}
+${PE1}`, 2).length, 2); // cap
+  assert.deepEqual(parsePorList('<html>no addresses</html>'), []);
+
+  // --- 8C: explorer tag -> category mapping ---
+  assert.deepEqual(mapExplorerTag('Binance-Hot 1'), { name: 'Binance-Hot 1', category: 'exchange', exchange: 'Binance' });
+  assert.equal(mapExplorerTag('OKX Deposit').exchange, 'OKX');
+  assert.equal(mapExplorerTag('Huobi-Cold').exchange, 'HTX');
+  assert.equal(mapExplorerTag('SunSwap Router').category, 'service'); // not an allowlisted exchange: weight 0, tag kept verbatim
+  assert.equal(mapExplorerTag('Notbinance').category, 'service'); // prefix match only
+  assert.equal(mapExplorerTag('Binance fake', true).category, 'other'); // a red (flagged) tag is never promoted to exchange
+  assert.deepEqual(pickTronscanTag({ addressTag: 'Binance-Hot 1', publicTag: '', blueTag: '', redTag: '' }), { tag: 'Binance-Hot 1', red: false });
+  assert.equal(pickTronscanTag({ addressTag: undefined, publicTag: '', blueTag: '', redTag: '' }), null);
+  assert.equal(pickTronscanTag({ redTag: 'Scam' })!.red, true);
+
+  // --- 8C: service-scale heuristic ---
+  assert.ok(isServiceScale({ status: 'capped', rowCount: 10 }) && isServiceScale({ status: 'complete', rowCount: SERVICE_SCALE_ROWS }));
+  assert.ok(!isServiceScale({ status: 'complete', rowCount: SERVICE_SCALE_ROWS - 1 }) && !isServiceScale(null));
 
   // --- transfer index (7A): seq dedupe, read-through decisions, incremental sync, block-range paging ---
   const tr = (hash: string, amount: number, from = 'A', to = 'B', asset = 'usdt') => ({ asset, hash, from, to, amount, timestamp: 1 });

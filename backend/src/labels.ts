@@ -2,7 +2,9 @@ import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get,
 import { Label } from '@prisma/client';
 import { issuerName } from './assets';
 import { CurrentCtx, Perm } from './auth';
-import { Chain, detectChain, ethFreezeEvents, hasEtherscanKey, norm, tronFreezeEvents } from './chains';
+import { Chain, detectChain, ethFreezeEvents, fetchJson, hasEtherscanKey, norm, tronFreezeEvents } from './chains';
+import { cacheGet, cacheSet } from './kv';
+import { mapExplorerTag, parsePorList, pickTronscanTag, porName, POR_MAX_BYTES, POR_SOURCES } from './exchange-labels';
 import { audit, Ctx, Db } from './db';
 import { Jobs } from './jobs';
 import { CATEGORIES } from './risk-score';
@@ -13,6 +15,9 @@ const OFAC_LISTS = ['USDT', 'TRX', 'ETH'].map(
   (s) => `https://raw.githubusercontent.com/0xB10C/ofac-sanctioned-digital-currency-addresses/lists/sanctioned_addresses_${s}.txt`,
 );
 const DAY = 86_400_000;
+const TAG_TTL_SEC = 7 * 86_400;
+const TRONSCAN = 'https://apilist.tronscanapi.com/api/accountv2';
+export const hasTronscanKey = () => !!process.env.TRONSCAN_API_KEY;
 
 export type LabelLite = Pick<Label, 'name' | 'category' | 'source' | 'confidence'>;
 
@@ -32,6 +37,11 @@ export class LabelsService implements OnModuleInit {
     });
     this.jobs.every('tether-sync', 30 * 60_000, () => this.syncTether(), 15_000);
     this.jobs.every('circle-sync', 30 * 60_000, () => this.syncCircle(), 45_000);
+    // 8.14: weekly proof-of-reserves refresh (a no-op while POR_SOURCES is empty).
+    this.jobs.every('por-sync', 60 * 60_000, async () => {
+      const last = Number((await this.getSetting('por.lastSync')) ?? 0);
+      if (Date.now() - last > 7 * DAY) await this.syncPor();
+    }, 60_000);
     this.seedOfficial().catch((e) => this.log.error(`official label seed failed: ${(e as Error).message}`));
   }
 
@@ -41,6 +51,73 @@ export class LabelsService implements OnModuleInit {
       const where = { chain_address_source_orgId: { chain: l.chain, address: l.address, source: 'official', orgId: 0 } };
       await this.db.label.upsert({ where, create: { chain: l.chain, address: l.address, name: l.name, category: l.category, source: 'official', sourceUrl: l.url, orgId: 0 }, update: { name: l.name, category: l.category, sourceUrl: l.url } });
     }
+  }
+
+  /** Text body of an official list URL (https only, no redirects, 20 s, POR_MAX_BYTES). The URL comes from POR_SOURCES, not from users. */
+  private async fetchList(url: string): Promise<string> {
+    if (!url.startsWith('https://')) throw new Error('list URL must be https');
+    const res = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(20_000), headers: { accept: 'text/csv,application/json,text/plain' } });
+    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    for await (const c of res.body as unknown as AsyncIterable<Uint8Array>) {
+      size += c.length;
+      if (size > POR_MAX_BYTES) throw new Error('list is larger than the size cap');
+      chunks.push(c);
+    }
+    return Buffer.concat(chunks).toString('utf8');
+  }
+
+  /**
+   * 8.14: imports every list in POR_SOURCES as global `official` exchange labels (sourceUrl = the fetched URL), in batches.
+   * A list that fails or parses to nothing is reported and leaves its previous labels untouched; one exchange failing never stops the rest.
+   */
+  async syncPor() {
+    const report: { exchange: string; url: string; tron?: number; eth?: number; error?: string }[] = [];
+    for (const src of POR_SOURCES) {
+      try {
+        const rows = parsePorList(await this.fetchList(src.url));
+        if (!rows.length) throw new Error('no valid addresses found in the list');
+        const name = porName(src.exchange);
+        for (let i = 0; i < rows.length; i += 500) {
+          await this.db.$transaction(
+            rows.slice(i, i + 500).map((r) => {
+              const where = { chain_address_source_orgId: { chain: r.chain, address: r.address, source: 'official', orgId: 0 } };
+              return this.db.label.upsert({ where, create: { chain: r.chain, address: r.address, name, category: 'exchange', source: 'official', sourceUrl: src.url, orgId: 0 }, update: { name, category: 'exchange', sourceUrl: src.url } });
+            }),
+          );
+        }
+        report.push({ exchange: src.exchange, url: src.url, tron: rows.filter((r) => r.chain === 'tron').length, eth: rows.filter((r) => r.chain === 'eth').length });
+      } catch (e) {
+        report.push({ exchange: src.exchange, url: src.url, error: (e as Error).message });
+        this.log.warn(`PoR list ${src.exchange} failed: ${(e as Error).message}`);
+      }
+    }
+    await this.setSetting('por.lastSync', String(Date.now()));
+    this.log.log(`PoR sync: ${JSON.stringify(report)}`);
+    return { sources: POR_SOURCES.length, report };
+  }
+
+  /**
+   * 8.15: lazy Tronscan tag lookup for one Tron address (cached 7 days, misses included) -> upsert of a global label `source=tronscan`.
+   * Needs TRONSCAN_API_KEY; only that key goes to Tronscan (never the TronGrid key). Returns the label, null (untagged) or 'no_key'.
+   */
+  async tronscanTag(address: string): Promise<{ name: string; category: string } | null | 'no_key'> {
+    const key = process.env.TRONSCAN_API_KEY;
+    if (!key) return 'no_key';
+    if (detectChain(address) !== 'tron') throw new BadRequestException('Tronscan tags exist for Tron addresses only');
+    const ck = `tronscan-tag:${address}`;
+    const hit = await cacheGet(ck);
+    if (hit !== undefined) return hit;
+    const j = await fetchJson(`${TRONSCAN}?address=${address}`, { headers: { 'TRON-PRO-API-KEY': key } }, 400);
+    const t = pickTronscanTag(j);
+    const out = t ? mapExplorerTag(t.tag, t.red) : null;
+    if (out) {
+      const where = { chain_address_source_orgId: { chain: 'tron', address, source: 'tronscan', orgId: 0 } };
+      await this.db.label.upsert({ where, create: { chain: 'tron', address, name: out.name, category: out.category, source: 'tronscan', sourceUrl: `https://tronscan.org/#/address/${address}`, orgId: 0 }, update: { name: out.name, category: out.category } });
+    }
+    await cacheSet(ck, out && { name: out.name, category: out.category }, TAG_TTL_SEC);
+    return out && { name: out.name, category: out.category };
   }
 
   /** Labels of the given categories on exactly this chain (no Ethereum -> BNB Chain carry-over: bridge and dex contracts differ per chain). */
@@ -206,13 +283,14 @@ export class LabelsController {
 
   @Perm('labels.view')
   @Get()
-  async list(@CurrentCtx() ctx: Ctx, @Query('q') q?: string, @Query('category') category?: string, @Query('source') source?: string, @Query('page') page?: string) {
+  async list(@CurrentCtx() ctx: Ctx, @Query('q') q?: string, @Query('category') category?: string, @Query('source') source?: string, @Query('exchange') exchange?: string, @Query('page') page?: string) {
     const p = int(page, 0, 0, 10000);
     const where = {
       orgId: { in: [0, ctx.orgId] },
       ...(q ? { OR: [{ address: { contains: q.trim(), mode: 'insensitive' as const } }, { name: { contains: q.trim(), mode: 'insensitive' as const } }] } : {}),
       ...(category ? { category } : {}),
-      ...(source ? { source } : {}),
+      ...(source ? { source: source === 'explorer' ? { in: ['tronscan', 'etherscan'] } : source } : {}), // 'explorer' = both explorer sources
+      ...(exchange ? { category: 'exchange', name: { contains: exchange.trim().slice(0, 50), mode: 'insensitive' as const } } : {}),
     };
     const [rows, total] = await Promise.all([this.db.label.findMany({ where, orderBy: { id: 'desc' }, skip: p * 100, take: 100 }), this.db.label.count({ where })]);
     return { rows, total, page: p, pageSize: 100 };
@@ -229,6 +307,9 @@ export class LabelsController {
       tetherLastSync: await s('tether.lastSync'),
       circleLastSync: await s('circle.lastSync'),
       etherscanKey: hasEtherscanKey(),
+      tronscanKey: hasTronscanKey(),
+      porLastSync: await s('por.lastSync'),
+      porSources: POR_SOURCES.length,
       categories: CATEGORIES,
     };
   }
@@ -239,6 +320,14 @@ export class LabelsController {
     const chain = detectChain(addr);
     if (!chain) throw new BadRequestException('Invalid address');
     return this.db.label.findMany({ where: { chain, address: norm(addr), orgId: { in: [0, ctx.orgId] } } });
+  }
+
+  /** 8.15: lazy Tronscan tag for one Tron address (high-volume counterparties); cached, needs TRONSCAN_API_KEY. */
+  @Perm('labels.view')
+  @Post('explorer-tag')
+  async explorerTag(@Body() b: any) {
+    const r = await this.labels.tronscanTag(str(b.address, 'address'));
+    return r === 'no_key' ? { status: 'no_key' } : r ? { status: 'tagged', ...r } : { status: 'untagged' };
   }
 
   @Perm('labels.manage')
@@ -297,9 +386,9 @@ export class LabelsController {
   @Perm('labels.sync')
   @Post('sync')
   async sync(@Body() b: any) {
-    const which = oneOf(b.source, 'source', ['ofac', 'tether', 'circle'] as const);
+    const which = oneOf(b.source, 'source', ['ofac', 'tether', 'circle', 'por'] as const);
     try {
-      return which === 'ofac' ? await this.labels.syncOfac() : which === 'tether' ? await this.labels.syncTether() : await this.labels.syncCircle();
+      return which === 'ofac' ? await this.labels.syncOfac() : which === 'por' ? await this.labels.syncPor() : which === 'tether' ? await this.labels.syncTether() : await this.labels.syncCircle();
     } catch (e) {
       throw new BadRequestException(`Sync failed: ${(e as Error).message}`);
     }

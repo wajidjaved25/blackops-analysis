@@ -6,6 +6,7 @@ import { AssetFilter, Chain, flows, frozenBy, frozenStatus, getBalances, getTran
 import { audit, Ctx, Db } from './db';
 import { buildGraph, findPath, GetFlows, GraphNode, withVolumes } from './graph';
 import { swapsOfTx } from './crosschain';
+import { isServiceScale } from './exchange-labels';
 import { LabelsService } from './labels';
 import { RiskService } from './risk';
 import { TransferIndex } from './transfer-index';
@@ -95,6 +96,7 @@ export class InvestigateController {
       transfers,
       coverage: cov && { status: cov.status, assets: cov.assets, rowCount: cov.rowCount, newestTs: cov.newestTs === null ? null : Number(cov.newestTs), lastSyncAt: cov.lastSyncAt },
       lifetime,
+      serviceScale: isServiceScale(cov), // 8.17 heuristic, not a label
     };
   }
 

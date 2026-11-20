@@ -14,11 +14,14 @@ import { addrHref, Asset, AssetFilter, assetSym, Chain, chainName, chainQ, explo
 import { useApi } from '@/lib/hooks';
 
 interface Label { name: string; category: string; source?: string; confidence?: number }
+interface FullLabel extends Label { id: number; sourceUrl?: string | null }
+const SRC_RANK: Record<string, number> = { official: 0, tronscan: 1, etherscan: 1, cluster: 2 };
+const SRC_KIND = (s?: string) => (s === 'official' ? 'official' : s === 'tronscan' || s === 'etherscan' ? 'explorer' : s ?? 'label');
 interface Assessment { score: number; level: string; own: number; direct: number; indirect: number; reasons: string[]; exposures: { address: string; name: string; category: string; weight: number; volume: number; share: number }[]; labels: Label[]; frozen: boolean; frozenBy: string[]; transfersChecked: number }
 interface Cp { address: string; in: number; out: number; inCount: number; outCount: number; label: { name: string; category: string } | null }
 interface Tr { hash: string; from: string; to: string; amount: number; asset: Asset; timestamp: number }
 interface AssetInfo { asset: Asset; symbol: string; decimals: number; issuer: 'tether' | 'circle' | null; note: string | null }
-interface Addr { chain: Chain; address: string; asset: AssetFilter; assets: AssetInfo[]; balances: Record<Asset, number>; frozenBy: string[]; frozenAssets: Record<Asset, boolean | null>; byAsset: Partial<Record<Asset, { in: number; out: number; count: number }>>; balance: number; frozen: boolean; totalIn: number; totalOut: number; txCount: number; truncated: boolean; firstSeen: number | null; lastSeen: number | null; risk: Assessment; counterparties: Cp[]; transfers: Tr[]; coverage: Coverage | null; lifetime: Lifetime | null }
+interface Addr { chain: Chain; address: string; asset: AssetFilter; assets: AssetInfo[]; balances: Record<Asset, number>; frozenBy: string[]; frozenAssets: Record<Asset, boolean | null>; byAsset: Partial<Record<Asset, { in: number; out: number; count: number }>>; balance: number; frozen: boolean; totalIn: number; totalOut: number; txCount: number; truncated: boolean; firstSeen: number | null; lastSeen: number | null; risk: Assessment; counterparties: Cp[]; transfers: Tr[]; coverage: Coverage | null; lifetime: Lifetime | null; serviceScale?: boolean }
 interface Coverage { status: 'pending' | 'backfilling' | 'complete' | 'capped' | 'error'; assets: string; rowCount: number; newestTs: number | null; lastSyncAt: string | null }
 interface Lifetime { in: number; out: number; inCount: number; outCount: number; counterparties: number; firstSeen: number | null; lastSeen: number | null }
 
@@ -44,6 +47,8 @@ export default function AddressPage() {
   // Summary first (latest 200 transfers, ~2 s); the 2-hop risk and the full history load afterwards.
   const { data: d, loading, error, status, reload } = useApi<Addr>(valid ? `/address/${addr}?limit=${full ? 1000 : 200}&${q}` : null);
   const deep = useApi<Assessment>(valid ? `/risk/${addr}?${q}` : null);
+  const full_labels = useApi<FullLabel[]>(valid ? `/labels/address/${addr}` : null);
+  const exLabel = useMemo(() => (full_labels.data ?? []).filter((l) => l.category === 'exchange').sort((a, b) => (SRC_RANK[a.source ?? ''] ?? 9) - (SRC_RANK[b.source ?? ''] ?? 9))[0], [full_labels.data]);
   const risk = deep.data ?? d?.risk;
   const [modal, setModal] = useState<'case' | 'watch' | 'label' | null>(null);
   const [dir, setDir] = useState<'all' | 'in' | 'out'>('all');
@@ -78,6 +83,8 @@ export default function AddressPage() {
           <AssetChips value={asset} onChange={(a) => setView(chainHint ?? 'eth', a)} />
           <span className="xs muted">USDT and USDC are both ≈ 1 USD, so mixed volumes are added and shown in USD.</span>
         </div>
+        {exLabel && <Notice tone="info"><span className="row" style={{ gap: 8 }}><b style={{ fontSize: 15 }}>{exLabel.name.replace(/\s*\(/, ' \u2014 ').replace(/\)$/, '')}</b><Badge tone={exLabel.source === 'official' ? 'good' : 'outline'}>{SRC_KIND(exLabel.source)}</Badge>{exLabel.sourceUrl && <a href={exLabel.sourceUrl} target="_blank" rel="noreferrer noopener">source</a>}<span className="xs muted">Exchange wallets are where tracing stops.</span></span></Notice>}
+        {!exLabel && d?.serviceScale && <Notice><b>Likely exchange/service (heuristic)</b>: this wallet's activity is at service scale (our index capped it or it has very many transfers). It is not a named label and does not affect the risk score.</Notice>}
         {chainHint === 'tron' && asset !== 'usdt' && <Notice>{TRON_USDC_NOTE}</Notice>}
 
         {loading && !d && (

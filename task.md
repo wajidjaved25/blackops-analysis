@@ -247,3 +247,18 @@ Deployed with PM2 + Apache (`deploy/DEPLOY-pm2-apache.md`). **Ethereum was live-
 - USDT and USDC transfers, balances, tx detail and live `isBlackListed` all work.
 - Freeze/sanctions syncs on Ethereum: Tether 1,516 events → 1,086 frozen labels; Circle 1,192 events → 712 labels; OFAC 127.
 - **BNB Chain:** Etherscan's free plan refuses `chainid=56` ("Free API access is not supported for this chain"), so BNB Chain needs a paid Etherscan plan or another data source.
+
+### 8C — Automatic exchange / service labels (asked 2026-11-20)
+Goal: wallets of Binance and other major exchanges are labelled automatically from public, citable sources, and tracing stops there. 8B already treats exchange/service/capped wallets as terminal.
+- [~] **8.14 Official proof-of-reserves lists** — import the wallet lists that exchanges themselves publish (e.g. Binance, OKX, Bybit, KuCoin, Bitget, HTX where available), on Tron/Ethereum/BNB Chain. `source=official`, `sourceUrl` = the exchange's page, category `exchange`, name "Binance (proof-of-reserves wallet)". Refreshed weekly. Only lists actually fetched and parsed in-session; every address format-checked.
+- [x] **8.15 Explorer tags (opt-in keys)** — Tronscan public tags (needs a free `TRONSCAN_API_KEY`) and Etherscan name tags where the plan allows. Looked up lazily for high-volume counterparties and cached. `source=tronscan|etherscan`, the tag text kept verbatim; mapped to `exchange` only when the tag names a known exchange.
+- [x] **8.16 Deposit addresses follow their exchange** — a wallet that sweeps to an officially labelled exchange hot wallet (existing clustering in cluster.ts/attribution.ts) is auto-labelled "<Exchange> deposit address" with `source=cluster` and the sweep tx as evidence, when the evidence threshold is met; weaker cases stay in the review queue.
+- [x] **8.17 Service-scale heuristic** — wallets above the index cap or with service-scale activity are shown as "likely exchange/service (heuristic)" — not named, not traced, never risk-weighted as an exchange.
+- [x] **8.18 UI + checks** — label source badges (official / explorer / cluster / heuristic) with links; Labels page filters; self-check for list parsers and the tag→category mapping.
+
+**8C status (branch phase-8c):**
+- 8.14 [~]: pipeline done (`exchange-labels.ts` `POR_SOURCES`, weekly `por-sync`, `POST /labels/sync {source:'por'}`, generic validated parser) but **`POR_SOURCES` is empty**: on 2026-11-20 no exchange's official wallet list could be fetched (Binance page script-rendered, OKX unreachable, Bybit/KuCoin pages carry no addresses, Bitget's address API needs undocumented params, HTX 404, Gate 403). Add `{ exchange, url }` once a real file URL is verified.
+- 8.15: Tronscan lookup built (`POST /labels/explorer-tag`, `TRONSCAN_API_KEY` optional) but live call untested (no key). Etherscan name tags are Pro Plus only: not implemented.
+- 8.16: auto-accept when hot wallet is `source=official` and (>= 2 sweeps or one sweep >= 95% of received).
+- 8.17: `isServiceScale` (capped, or >= 20,000 indexed rows); address page shows "likely exchange/service (heuristic)".
+- 8.18: Labels page source badges + source/exchange filters, address-page exchange banner, selfcheck asserts, `frontend/e2e/exchange-labels.spec.ts`.

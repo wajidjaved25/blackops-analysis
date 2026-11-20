@@ -1,7 +1,7 @@
 import { BadRequestException, Body, Controller, Get, Injectable, OnModuleInit, Param, Post, Query } from '@nestjs/common';
 import { CurrentCtx, Perm } from './auth';
 import { Chain, getTransfers, norm } from './chains';
-import { clusterConfidence, depositEvidence } from './cluster';
+import { autoAcceptDeposit, clusterConfidence, depositEvidence, exchangeName } from './cluster';
 import { audit, Ctx, Db } from './db';
 import { Jobs } from './jobs';
 import { LabelsService } from './labels';
@@ -15,6 +15,7 @@ interface Hot {
   chain: Chain;
   address: string;
   name: string;
+  source?: string;
 }
 
 @Injectable()
@@ -54,10 +55,20 @@ export class ClusterWorker implements OnModuleInit {
       try {
         const ev = depositEvidence(addr, await getTransfers(hot.chain, addr, 300, false, 'graph'), hot.address);
         if (!ev) continue;
+        const confidence = clusterConfidence(ev);
+        // 8.16: strong evidence against an officially labelled exchange hot wallet is accepted straight away.
+        const auto = hot.source === 'official' && autoAcceptDeposit(ev);
+        const name = auto ? `${exchangeName(hot.name)} deposit address` : `${hot.name} deposit`;
         const r = await this.db.clusterSuggestion.createMany({
-          data: [{ orgId, chain: hot.chain, address: addr, name: `${hot.name} deposit`, category: 'exchange', confidence: clusterConfidence(ev), evidence: ev as any }],
+          data: [{ orgId, chain: hot.chain, address: addr, name, category: 'exchange', confidence, evidence: ev as any, status: auto ? 'accepted' : 'pending' }],
           skipDuplicates: true,
         });
+        if (auto && r.count)
+          await this.db.label.upsert({
+            where: { chain_address_source_orgId: { chain: hot.chain, address: addr, source: 'cluster', orgId } },
+            create: { chain: hot.chain, address: addr, name, category: 'exchange', source: 'cluster', confidence, orgId },
+            update: { name, category: 'exchange', confidence },
+          });
         created += r.count;
       } catch {
         /* one unreachable candidate must not fail the run */
@@ -86,7 +97,7 @@ export class AttributionController {
       );
     }
     const seen = new Set<string>();
-    const hots = rows.filter((l) => !seen.has(l.chain + l.address) && seen.add(l.chain + l.address)).slice(0, MAX_HOT_WALLETS).map((l) => ({ chain: l.chain as Chain, address: l.address, name: l.name }));
+    const hots = rows.filter((l) => !seen.has(l.chain + l.address) && seen.add(l.chain + l.address)).slice(0, MAX_HOT_WALLETS).map((l) => ({ chain: l.chain as Chain, address: l.address, name: l.name, source: l.source }));
     const job = await this.jobs.enqueue(ctx.orgId, 'cluster', { hots }, hots.length);
     await audit(this.db, ctx, 'attribution.run', `job:${job.id}`, { hotWallets: hots.length });
     return { jobId: job.id };
