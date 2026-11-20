@@ -5,6 +5,7 @@ import { CurrentCtx, Perm } from './auth';
 import { Chain, detectChain, ethFreezeEvents, fetchJson, hasEtherscanKey, norm, tronFreezeEvents } from './chains';
 import { cacheGet, cacheSet } from './kv';
 import { mapExplorerTag, parsePorList, pickTronscanTag, porName, POR_MAX_BYTES, POR_SOURCES } from './exchange-labels';
+import { BinancePor, POR_MAX_INPUT } from './binance-por';
 import { audit, Ctx, Db } from './db';
 import { Jobs } from './jobs';
 import { CATEGORIES } from './risk-score';
@@ -279,7 +280,32 @@ export class LabelsController {
   constructor(
     private db: Db,
     private labels: LabelsService,
+    private por: BinancePor,
   ) {}
+
+  /**
+   * 8.19 Binance proof-of-reserves find-and-mark. Body `{addresses:[{chain,address}]}` (max 5,000, each validated). Needs `labels.sync`:
+   * a match writes a GLOBAL official label and a miss triggers a ~290 MB download. Lists are streamed and never stored.
+   * A miss is not evidence that an address is not a Binance customer (the deposit list holds balance-holding addresses only).
+   */
+  @Perm('labels.sync')
+  @Post('exchange-check')
+  async exchangeCheck(@CurrentCtx() ctx: Ctx, @Body() b: any) {
+    if (!Array.isArray(b?.addresses) || !b.addresses.length) throw new BadRequestException('addresses must be a non-empty list of {chain, address}');
+    if (b.addresses.length > POR_MAX_INPUT) throw new BadRequestException(`Too many addresses (${b.addresses.length}); max ${POR_MAX_INPUT} per call`);
+    const seen = new Map<string, { chain: Chain; address: string }>();
+    for (const a of b.addresses) {
+      const p = parseAddr(a?.address, a?.chain);
+      seen.set(p.chain + p.addr, { chain: p.chain, address: p.addr });
+    }
+    try {
+      const r = await this.por.check([...seen.values()]);
+      await audit(this.db, ctx, 'label.exchange-check', r.snapshot, { checked: r.checked, matched: r.matched });
+      return r;
+    } catch (e) {
+      throw new BadRequestException(`Binance check failed: ${(e as Error).message}`);
+    }
+  }
 
   @Perm('labels.view')
   @Get()

@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client';
 import { BadRequestException, Body, Controller, Get, Injectable, OnModuleInit, Param, Post, Query } from '@nestjs/common';
 import { CurrentCtx, Perm } from './auth';
 import { Chain, getTransfers, norm } from './chains';
@@ -89,7 +90,7 @@ export class AttributionController {
   @Post('run')
   async run(@CurrentCtx() ctx: Ctx, @Body() b: any) {
     // Cluster labels are deposit addresses, not hot wallets, so they are never used as the anchor.
-    const where = { category: 'exchange', source: { not: 'cluster' }, orgId: { in: [0, ctx.orgId] }, ...(b.labelId !== undefined ? { id: id(b.labelId) } : {}) };
+    const where: Prisma.LabelWhereInput = { category: 'exchange', source: { notIn: ['cluster', 'statement'] }, NOT: { name: { contains: 'deposit address', mode: 'insensitive' } }, orgId: { in: [0, ctx.orgId] }, ...(b.labelId !== undefined ? { id: id(b.labelId) } : {}) };
     const rows = await this.db.label.findMany({ where, orderBy: { id: 'asc' }, take: 200 });
     if (!rows.length) {
       throw new BadRequestException(

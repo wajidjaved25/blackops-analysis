@@ -9,12 +9,13 @@ import { level, scoreRisk } from './risk-score';
 import { autoAcceptDeposit, clusterConfidence, depositEvidence, exchangeName } from './cluster';
 import { isServiceScale, mapExplorerTag, parsePorList, pickTronscanTag, porName, SERVICE_SCALE_ROWS } from './exchange-labels';
 import { withVolumes } from './graph';
+import { auditId, parsePorLine, parseSnapshot, porKey, porLabelName, snapshotIso } from './binance-por';
 import { planRead, retryDelayMs, splitBoundary, tailEnd, withSeq } from './index-rules';
 import { evaluateRules, ruleParams } from './monitor-rules';
 import { ALL_PERMS, hasAny, missing, PERMISSIONS, SYSTEM_ROLES } from './permissions';
 import { graphAddresses, pickSources, timelineHops } from './timeline';
 import { base32, newRecoveryCodes, openSecret, recoveryHash, sealSecret, totp, unbase32, verifyTotp } from './totp';
-import { detectFormat, headerTz, matchTx, networkChain, normalizeRows, parseTime, tzMinutes } from './statements';
+import { detectFormat, exchangeOfFormat, headerTz, matchTx, networkChain, normalizeRows, offChainDepositAddresses, parseTime, tzMinutes } from './statements';
 import { readGrid } from './case-tx';
 import ExcelJS from 'exceljs';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -454,6 +455,42 @@ ${PE1}`, 2).length, 2); // cap
   // --- SSRF guard ---
   assert.ok(['127.0.0.1', '10.1.2.3', '172.16.0.1', '192.168.1.1', '169.254.169.254', '::1', 'fd00::1', '::ffff:10.0.0.1'].every(privateIp));
   assert.ok(!['8.8.8.8', '172.32.0.1', '2606:4700::1111'].some(privateIp));
+
+  // --- 8.19 Binance proof-of-reserves find-and-mark (pure parts) ---
+  {
+    const s = parseSnapshot('12/11/26 00:00:00 UTC | BTC Block Height 975493')!;
+    assert.deepEqual([auditId(s), snapshotIso(s)], ['PR12NOV26', '2026-11-12']);
+    assert.equal(auditId(parseSnapshot('01/09/26 00:00:00 UTC | BTC Block Height 964957')!), 'PR01SEP26');
+    assert.equal(auditId(parseSnapshot('31/12/25 00:00:00 UTC')!), 'PR31DEC25');
+    assert.equal(parseSnapshot('garbage'), null);
+    assert.equal(porLabelName('hotcold', s), 'Binance hot/cold wallet (proof-of-reserves 12 Nov 2026)');
+    assert.equal(porLabelName('deposit', s), 'Binance deposit address (proof-of-reserves 12 Nov 2026)');
+    const TR = 'TQn9Y2khEsLJW1ChVWFMSMeRDow5KcbLSE';
+    assert.deepEqual(parsePorLine(`USDT,TRX,${TR},1.5,100,`), { chain: 'tron', address: TR }); // Tron keeps its case
+    assert.deepEqual(parsePorLine('USDT,ETH,0xAbCdEf0123456789aBcDeF0123456789AbCdEf01,2,100,Ceffu'), { chain: 'eth', address: '0xabcdef0123456789abcdef0123456789abcdef01' });
+    assert.equal(parsePorLine('USDT,BSC,0xAbCdEf0123456789aBcDeF0123456789AbCdEf01,2,100,')!.chain, 'bsc');
+    assert.equal(parsePorLine('BTC,BTC,bc1qxyz,1,100,'), null); // unsupported network
+    assert.equal(parsePorLine('coin,network,address,balance,Height,Third party custodian name'), null); // header
+    // matching: Tron case-sensitive, EVM lowercase
+    const want = new Set([porKey({ chain: 'tron', address: TR }), porKey({ chain: 'eth', address: norm('0xAbCdEf0123456789aBcDeF0123456789AbCdEf01') })]);
+    assert.ok(want.has(porKey(parsePorLine('USDT,ETH,0xABCDEF0123456789ABCDEF0123456789ABCDEF01,2,1,')!)));
+    assert.ok(!want.has(porKey(parsePorLine(`USDT,TRX,${TR.toLowerCase()},1,1,`)!)));
+    assert.ok(!want.has(porKey(parsePorLine('USDT,BSC,0xabcdef0123456789abcdef0123456789abcdef01,1,1,')!))); // other chain, other key
+    assert.equal(exchangeName('Binance hot/cold wallet (proof-of-reserves 12 Nov 2026)'), 'Binance');
+    assert.equal(exchangeName('Binance deposit address (per exchange statement: case #1, "a.xlsx")'), 'Binance');
+    // statement: Off-chain transfer rows -> deposit address (one per address); on-chain / bad rows are not
+    const H8 = ['Date(UTC+0)', 'Coin', 'Network', 'Amount', 'Fee', 'Address', 'TXID', 'Status'];
+    const d8 = detectFormat(H8);
+    const rows8 = normalizeRows(
+      [H8, ['2026-01-05 13:45:10', 'USDT', 'TRX', 100, 0, W1, 'Off-chain transfer 111', 'Completed'], ['2026-01-06 13:45:10', 'USDT', 'TRX', 50, 0, W1, 'Off-chain transfer 112', 'Completed'], ['2026-01-07 13:45:10', 'USDT', 'ETH', 7, 0, '0xAbCdEf0123456789aBcDeF0123456789AbCdEf01', 'Off-chain transfer 113', 'Completed'], ['2026-01-08 13:45:10', 'USDT', 'TRX', 5, 0, W2, 'a'.repeat(64), 'Completed'], ['2026-01-09 13:45:10', 'USDT', 'TRX', 5, 0, 'not-an-address', 'Off-chain transfer 114', 'Completed']],
+      d8.mapping,
+      { tz: 0 },
+    );
+    const dep = offChainDepositAddresses(rows8);
+    assert.deepEqual(dep, [{ chain: 'tron', address: W1 }, { chain: 'eth', address: '0xabcdef0123456789abcdef0123456789abcdef01' }]);
+    assert.equal(exchangeOfFormat(d8.format), 'Binance');
+    assert.equal(exchangeOfFormat('generic'), null);
+  }
 
   console.log('selfcheck: all passed');
 }

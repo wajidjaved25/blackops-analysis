@@ -65,4 +65,4 @@ export function autoAcceptDeposit(e: DepositEvidence): boolean {
 }
 
 /** "Binance (proof-of-reserves wallet)" -> "Binance". */
-export const exchangeName = (labelName: string) => labelName.replace(/\s*\(.*\)\s*$/, '').trim() || labelName;
+export const exchangeName = (labelName: string) => labelName.replace(/\s*\(.*\)\s*$/, '').replace(/\s+(hot\/cold wallet|deposit address)$/i, '').trim() || labelName;

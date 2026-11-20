@@ -17,7 +17,7 @@ interface Label { id: number; orgId: number; chain: string; address: string; nam
 interface St { counts: Record<string, number>; ofacLastSync?: string; tetherLastSync?: string; circleLastSync?: string; etherscanKey?: boolean; categories: string[] }
 const EXCHANGES = ['Binance', 'OKX', 'Bybit', 'KuCoin', 'Bitget', 'HTX', 'Gate', 'Kraken', 'Coinbase'];
 // 8C source badges: official (vendor page) / explorer (Tronscan, Etherscan tags) / cluster (deposit attribution) / heuristic (not stored as a label).
-const sourceKind = (s: string) => (s === 'official' ? 'official' : s === 'tronscan' || s === 'etherscan' ? 'explorer' : s === 'cluster' ? 'cluster' : s);
+const sourceKind = (s: string) => (s === 'official' ? 'official' : s === 'tronscan' || s === 'etherscan' ? 'explorer' : s === 'cluster' ? 'cluster' : s === 'statement' ? 'statement' : s);
 interface Dry { total: number; valid: number; errors: { line: number; address: string; error: string }[]; preview?: unknown[] }
 
 export default function Labels() {
@@ -66,7 +66,7 @@ export default function Labels() {
         <Card flush title={<span className="row">
           <span style={{ position: 'relative' }}><Search size={14} style={{ position: 'absolute', left: 10, top: 8, color: 'var(--faint)' }} aria-hidden /><Input sm style={{ paddingLeft: 30, width: 240 }} placeholder="Search name or address" aria-label="Search labels" value={q} onChange={(e) => { setQ(e.target.value); setPage(0); }} /></span>
           <Select sm style={{ width: 150 }} aria-label="Category" value={cat} onChange={(e) => { setCat(e.target.value); setPage(0); }}><option value="">All categories</option>{(st.data?.categories ?? []).map((c) => <option key={c}>{c}</option>)}</Select>
-          <Select sm style={{ width: 130 }} aria-label="Source" value={src} onChange={(e) => { setSrc(e.target.value); setPage(0); }}><option value="">All sources</option>{['official', 'explorer', 'cluster', 'ofac', 'tether', 'circle', 'manual', 'import'].map((c) => <option key={c}>{c}</option>)}</Select>
+          <Select sm style={{ width: 130 }} aria-label="Source" value={src} onChange={(e) => { setSrc(e.target.value); setPage(0); }}><option value="">All sources</option>{['official', 'explorer', 'statement', 'cluster', 'ofac', 'tether', 'circle', 'manual', 'import'].map((c) => <option key={c}>{c}</option>)}</Select>
           <Select sm style={{ width: 140 }} aria-label="Exchange" value={exch} onChange={(e) => { setExch(e.target.value); setPage(0); }}><option value="">All exchanges</option>{EXCHANGES.map((c) => <option key={c}>{c}</option>)}</Select>
         </span>}>
           {list.loading ? <SkeletonRows /> : list.error ? <ErrorState error={list.error} status={list.status} onRetry={list.reload} /> : (

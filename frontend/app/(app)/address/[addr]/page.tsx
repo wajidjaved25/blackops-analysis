@@ -15,7 +15,7 @@ import { useApi } from '@/lib/hooks';
 
 interface Label { name: string; category: string; source?: string; confidence?: number }
 interface FullLabel extends Label { id: number; sourceUrl?: string | null }
-const SRC_RANK: Record<string, number> = { official: 0, tronscan: 1, etherscan: 1, cluster: 2 };
+const SRC_RANK: Record<string, number> = { official: 0, tronscan: 1, etherscan: 1, statement: 1, cluster: 2 };
 const SRC_KIND = (s?: string) => (s === 'official' ? 'official' : s === 'tronscan' || s === 'etherscan' ? 'explorer' : s ?? 'label');
 interface Assessment { score: number; level: string; own: number; direct: number; indirect: number; reasons: string[]; exposures: { address: string; name: string; category: string; weight: number; volume: number; share: number }[]; labels: Label[]; frozen: boolean; frozenBy: string[]; transfersChecked: number }
 interface Cp { address: string; in: number; out: number; inCount: number; outCount: number; label: { name: string; category: string } | null }
@@ -83,7 +83,7 @@ export default function AddressPage() {
           <AssetChips value={asset} onChange={(a) => setView(chainHint ?? 'eth', a)} />
           <span className="xs muted">USDT and USDC are both ≈ 1 USD, so mixed volumes are added and shown in USD.</span>
         </div>
-        {exLabel && <Notice tone="info"><span className="row" style={{ gap: 8 }}><b style={{ fontSize: 15 }}>{exLabel.name.replace(/\s*\(/, ' \u2014 ').replace(/\)$/, '')}</b><Badge tone={exLabel.source === 'official' ? 'good' : 'outline'}>{SRC_KIND(exLabel.source)}</Badge>{exLabel.sourceUrl && <a href={exLabel.sourceUrl} target="_blank" rel="noreferrer noopener">source</a>}<span className="xs muted">Exchange wallets are where tracing stops.</span></span></Notice>}
+        {exLabel && <Notice tone="info"><span className="row" style={{ gap: 8 }}><b style={{ fontSize: 15 }}>{exLabel.name.replace(/\s*\(/, ' \u2014 ').replace(/\)$/, '')}</b><Badge tone={exLabel.source === 'official' ? 'good' : 'outline'}>{SRC_KIND(exLabel.source)}</Badge>{exLabel.source === 'statement' && <span className="xs muted">from a customer's exchange statement in a case, not a public list</span>}{exLabel.sourceUrl && <a href={exLabel.sourceUrl} target="_blank" rel="noreferrer noopener">source</a>}<span className="xs muted">Exchange wallets are where tracing stops.</span></span></Notice>}
         {!exLabel && d?.serviceScale && <Notice><b>Likely exchange/service (heuristic)</b>: this wallet's activity is at service scale (our index capped it or it has very many transfers). It is not a named label and does not affect the risk score.</Notice>}
         {chainHint === 'tron' && asset !== 'usdt' && <Notice>{TRON_USDC_NOTE}</Notice>}
 
