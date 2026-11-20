@@ -16,7 +16,17 @@ interface Label { name: string; category: string; source?: string; confidence?: 
 interface Assessment { score: number; level: string; own: number; direct: number; indirect: number; reasons: string[]; exposures: { address: string; name: string; category: string; weight: number; volume: number; share: number }[]; labels: Label[]; frozen: boolean; transfersChecked: number }
 interface Cp { address: string; in: number; out: number; inCount: number; outCount: number; label: { name: string; category: string } | null }
 interface Tr { hash: string; from: string; to: string; amount: number; timestamp: number }
-interface Addr { chain: 'tron' | 'eth'; address: string; balance: number; frozen: boolean; totalIn: number; totalOut: number; txCount: number; truncated: boolean; firstSeen: number | null; lastSeen: number | null; risk: Assessment; counterparties: Cp[]; transfers: Tr[] }
+interface Addr { chain: 'tron' | 'eth'; address: string; balance: number; frozen: boolean; totalIn: number; totalOut: number; txCount: number; truncated: boolean; firstSeen: number | null; lastSeen: number | null; risk: Assessment; counterparties: Cp[]; transfers: Tr[]; coverage: Coverage | null; lifetime: Lifetime | null }
+interface Coverage { status: 'pending' | 'backfilling' | 'complete' | 'capped' | 'error'; rowCount: number; newestTs: number | null; lastSyncAt: string | null }
+interface Lifetime { in: number; out: number; inCount: number; outCount: number; counterparties: number; firstSeen: number | null; lastSeen: number | null }
+
+/** 7.4: says how much of the wallet's history our own index holds, so nobody mistakes a window for the whole story. */
+function CoverageBadge({ c, n }: { c: Coverage | null; n: number }) {
+  if (c?.status === 'complete') return <Badge tone="good" title="Full history is stored in our own index (Postgres)">Fully indexed · {c.rowCount.toLocaleString()} transfers</Badge>;
+  if (c?.status === 'capped') return <Badge tone="medium" title="Very large wallet: the newest transfers are indexed, older history is not">Index capped · newest {c.rowCount.toLocaleString()}</Badge>;
+  if (c?.status === 'backfilling' || c?.status === 'pending') return <Badge tone="info" title="Full history is being downloaded into our index in the background">Indexing history…</Badge>;
+  return <Badge tone="outline" title="Read live from the explorer API; not stored in our index">First {n.toLocaleString()} transfers (live API)</Badge>;
+}
 
 export default function AddressPage() {
   const { addr } = useParams<{ addr: string }>();
@@ -44,7 +54,7 @@ export default function AddressPage() {
     <RequirePerm perm="investigate.view">
       <div className="page stack" style={{ gap: 20 }}>
         <PageHeader crumbs={[{ label: 'Investigate', href: '/graph' }, { label: 'Address' }]}
-          title={<span className="row" style={{ gap: 10 }}>Address {d && <Badge tone="outline">{chainName(d.chain)}</Badge>}{d?.frozen && <Badge tone="severe">Frozen by Tether</Badge>}</span>}
+          title={<span className="row" style={{ gap: 10 }}>Address {d && <Badge tone="outline">{chainName(d.chain)}</Badge>}{d?.frozen && <Badge tone="severe">Frozen by Tether</Badge>}{d && <CoverageBadge c={d.coverage} n={d.txCount} />}</span>}
           sub={<span className="row nw" style={{ gap: 6 }}><code className="break" title={addr}>{addr}</code><CopyButton value={addr} label="Copy address" />{d && <a href={explorerAddr(d.chain, addr)} target="_blank" rel="noreferrer" aria-label="Open in block explorer" title="Open in block explorer"><ExternalLink size={14} /></a>}</span>}
           actions={<>
             <LinkButton href={`/graph?addr=${addr}`} variant="primary"><Network size={15} />Open in graph</LinkButton>
@@ -68,7 +78,7 @@ export default function AddressPage() {
             {d.truncated && (
               <Notice tone="warn">
                 <span className="row" style={{ justifyContent: 'space-between', width: '100%' }}>
-                  <span>Totals, counterparties and charts cover only the latest {d.txCount.toLocaleString()} transfers{full ? ' (the maximum shown here)' : ', not the full history'}.</span>
+                  <span>{d.lifetime ? 'Lifetime totals above come from the full index; counterparties and charts cover only the latest' : 'Totals, counterparties and charts cover only the latest'} {d.txCount.toLocaleString()} transfers{full ? ' (the maximum shown here)' : ', not the full history'}.</span>
                   {!full && <Button sm onClick={() => setFull(true)} disabled={loading}>{loading ? 'Loading…' : 'Load more history (up to 1,000)'}</Button>}
                 </span>
               </Notice>
@@ -103,10 +113,10 @@ export default function AddressPage() {
 
             <div className="kpis">
               <Stat label="Balance" value={usdt(d.balance)} />
-              <Stat label="Total received" value={usdt(d.totalIn)} />
-              <Stat label="Total sent" value={usdt(d.totalOut)} />
-              <Stat label="Transfers" value={d.txCount.toLocaleString()} sub={d.truncated ? 'latest window' : 'all time'} />
-              <Stat label="First seen" value={<span style={{ fontSize: 16 }}><DateTime t={d.firstSeen} /></span>} sub={<>Last: <Time t={d.lastSeen} /></>} />
+              <Stat label="Total received" value={usdt(d.lifetime?.in ?? d.totalIn)} sub={d.lifetime && <>lifetime · {d.lifetime.inCount.toLocaleString()} in</>} />
+              <Stat label="Total sent" value={usdt(d.lifetime?.out ?? d.totalOut)} sub={d.lifetime && <>lifetime · {d.lifetime.outCount.toLocaleString()} out</>} />
+              <Stat label="Transfers" value={(d.lifetime ? d.lifetime.inCount + d.lifetime.outCount : d.txCount).toLocaleString()} sub={d.lifetime ? <>lifetime · {d.lifetime.counterparties.toLocaleString()} counterparties</> : d.truncated ? 'latest window' : 'all time'} />
+              <Stat label="First seen" value={<span style={{ fontSize: 16 }}><DateTime t={d.lifetime?.firstSeen ?? d.firstSeen} /></span>} sub={<>Last: <Time t={d.lifetime?.lastSeen ?? d.lastSeen} /></>} />
             </div>
 
             <div className="grid g2">

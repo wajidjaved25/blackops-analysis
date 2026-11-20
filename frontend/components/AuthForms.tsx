@@ -1,7 +1,7 @@
 'use client';
 import { Download } from 'lucide-react';
 import QRCode from 'qrcode';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import { download } from '@/lib/format';
 import { useToast } from './Toast';
@@ -41,7 +41,10 @@ export function TotpEnroll({ onDone, onCancel }: { onDone: () => void; onCancel?
   const [codes, setCodes] = useState<string[] | null>(null);
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
+  const started = useRef(false); // dev StrictMode runs effects twice; a second setup call would replace the secret the user is looking at
   useEffect(() => {
+    if (started.current) return;
+    started.current = true;
     api<{ secret: string; otpauthUrl: string }>('/auth/2fa/setup', { method: 'POST' })
       .then(async (s) => { setSetup(s); setQr(await QRCode.toDataURL(s.otpauthUrl, { margin: 1, width: 192 })); })
       .catch((e) => setErr((e as Error).message));

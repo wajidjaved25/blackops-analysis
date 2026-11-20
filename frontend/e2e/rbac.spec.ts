@@ -40,11 +40,14 @@ test('viewer is restricted (nav hidden, buttons disabled, 403 page)', async ({ b
   }
   await v.goto('/');
   await expect(v.getByRole('navigation').getByRole('link', { name: 'Users', exact: true })).toHaveCount(0);
+  await expect(v.getByRole('navigation').getByRole('link', { name: 'Data index', exact: true })).toHaveCount(0);
   await expect(v.getByRole('navigation').getByRole('link', { name: 'Screening', exact: true })).toBeVisible();
   await v.screenshot({ path: 'e2e/screenshots/rbac-viewer-dashboard.png' });
   await v.goto('/cases');
   await expect(v.getByRole('button', { name: /New case/ })).toBeDisabled();
   await v.goto('/admin/users');
+  await expect(v.getByText("You don't have permission for this")).toBeVisible();
+  await v.goto('/admin/index');
   await expect(v.getByText("You don't have permission for this")).toBeVisible();
   await v.screenshot({ path: 'e2e/screenshots/rbac-403.png' });
 });

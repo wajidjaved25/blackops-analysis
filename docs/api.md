@@ -37,11 +37,12 @@ Permission keys (fixed list, defined once in the backend and returned by `GET /p
 | `roles.manage` | create/edit/delete custom roles |
 | `apikeys.manage` | create/revoke API keys |
 | `audit.view` | audit log |
+| `index.manage` | data index admin: coverage, backfill, re-sync, remove, tailer status |
 | `org.manage` | org settings (name, require 2FA, session lifetime, password policy) |
 
 Built-in (system) roles, created per org, not editable or deletable:
 - **Owner** — all permissions; the setup user. Must always be ≥ 1 active Owner.
-- **Admin** — all except `org.manage`.
+- **Admin** — all except `org.manage` (so it includes `index.manage`).
 - **Analyst** — investigate, export, screen, labels.view+manage, monitor.view+manage, alerts.triage, cases.view+manage, attribution.run+review.
 - **Viewer** — investigate.view, labels.view, monitor.view, cases.view.
 Admins can create **custom roles** with any subset (cannot grant a permission they don't hold themselves).
@@ -87,7 +88,7 @@ Admins can create **custom roles** with any subset (cannot grant a permission th
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/address/:addr?limit=200&deep=false` | `{ chain, address, balance, frozen, totalIn, totalOut, txCount, truncated, firstSeen, lastSeen, risk: Assessment, counterparties: [{ address, in, out, inCount, outCount, label: {name, category} \| null }], transfers: [{ hash, from, to, amount, timestamp }] }`. `truncated=true` → totals cover only the latest `txCount` transfers. **Default `limit=200` (one TronGrid page, ~2 s); max 2000.** `risk` is the *shallow* assessment (own labels, direct exposure, freeze check; `indirect` = 0) unless `deep=true`. The UI shows this at once, then loads `GET /risk/:addr` for the 2-hop result and offers "Load more history" (`limit=1000`, ~5 pages, 10–20 s on busy wallets). Balance, transfers and the freeze check run concurrently. |
+| GET | `/address/:addr?limit=200&deep=false` | `{ chain, address, balance, frozen, totalIn, totalOut, txCount, truncated, firstSeen, lastSeen, risk: Assessment, counterparties: [{ address, in, out, inCount, outCount, label: {name, category} \| null }], transfers: [{ hash, from, to, amount, timestamp }] }`. `truncated=true` → totals cover only the latest `txCount` transfers. **Default `limit=200` (one TronGrid page, ~2 s); max 2000.** **Phase 7A additions:** `coverage: { status: 'pending'\|'backfilling'\|'complete'\|'capped'\|'error', rowCount, newestTs, lastSyncAt } \| null` (null = wallet not in our index) and `lifetime: { in, out, inCount, outCount, counterparties, firstSeen, lastSeen } \| null` — **only non-null when `coverage.status = 'complete'`**, computed in SQL over the wallet's whole history (self-transfers excluded). `totalIn/totalOut/txCount/truncated` keep their old meaning (the returned window). `risk` is the *shallow* assessment (own labels, direct exposure, freeze check; `indirect` = 0) unless `deep=true`. The UI shows this at once, then loads `GET /risk/:addr` for the 2-hop result and offers "Load more history" (`limit=1000`, ~5 pages, 10–20 s on busy wallets). Balance, transfers and the freeze check run concurrently. |
 | GET | `/address/:addr/report.csv` | CSV download (summary + all transfers) |
 | GET | `/tx/:chain/:hash` | chain `tron`\|`eth` → `{ chain, hash, block, timestamp, success, transfers: [{ from, to, amount }] }` |
 | GET | `/graph/:addr?depth=1&fanout=8&from=&to=&min=` | depth 1–3, fanout 1–15, from/to ISO date or ms, min USDT → `{ chain, nodes: [{ id, root?, expanded, in?, out?, label?, category? }], edges: [{ id, source, target, amount, count }] }`. Edge id = `source>target`. |
@@ -172,6 +173,22 @@ Webhook: POST JSON `{ event: 'alert.created', alert }`, header `X-USDT-Trace-Sig
 | POST | `/attribution/suggestions/:id/accept` | creates org label `source=cluster` |
 | POST | `/attribution/suggestions/:id/reject` | |
 | POST | `/labels/import-url` | admin → `{ url, dryRun }` — fetch a CSV (same columns as `/labels/import`) and import as global `source=import` |
+
+## Data index (Phase 7A, own transfer index) ✅
+
+Global chain data (not org-scoped). All routes need `index.manage` and the mutating ones are audit-logged (`index.backfill`, `index.sync`, `index.remove`). Every feature reads address history through `getTransfers()`, which serves a wallet from Postgres once its history is stored; see the rules below.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/index/status` | `{ transfers: { count, approx }, addresses: { complete?, capped?, pending?, backfilling?, error? }, tailer: [{ chain: 'tron'\|'eth', enabled, cursorTs, lagMs, rowsTotal, rowsPerMin, error, needs }], reads: { db, sync, api }, upstream: { calls, byHost, recent: [{ t, url }] }, config: { maxPerAddress, freshSec } }`. `reads` and `upstream` are counters since process start; `upstream.calls` counts real HTTP attempts to explorer APIs (cache hits and Postgres reads excluded; 429 retries included), `recent` = last 100 URLs (API keys masked). `transfers.approx` is true above 1 M rows (planner estimate). `needs: 'ETH_RPC_URL'` when the Ethereum tailer is enabled without an RPC URL. |
+| GET | `/index/addresses?q=&status=&limit=50&offset=0` | `{ total, rows: [{ id, chain, address, status, reason: 'lookup'\|'watch'\|'case'\|'manual', rowCount, oldestTs, newestTs, lastSyncAt, error, createdAt }] }`, newest first; `q` = substring of the address |
+| POST | `/index/addresses` | `{ address }` — add a wallet (reason `manual`) or re-queue a full backfill for a listed one; `409` while its backfill is running |
+| POST | `/index/addresses/:addr/sync` | incremental sync now (only transfers at/after the newest stored); `409` unless status is `complete`/`capped`; `404` if not indexed |
+| DELETE | `/index/addresses/:addr` | drops the coverage row (reads go back to the live API); stored transfers are kept; `409` while backfilling |
+
+**Read-through rules** (`getTransfers(chain, addr, max, fresh, reason)`): wallet `complete` (or `capped` and `max` ≤ rows held) and synced within `INDEX_FRESH_SEC` → Postgres only. Covered but stale, or `fresh` (monitoring) → fetch only newer rows (`min_timestamp` on Tron, `startblock` on Ethereum), then Postgres. Anything else (unknown, `pending`, `backfilling`, `error`) → live API as before; the page is written through and, unless the caller is a graph/risk/attribution neighbour (`reason: 'graph'`), the wallet is queued for a background backfill (`INDEX_MAX_PER_ADDRESS`, default 50 000, then `capped` = newest N kept). With `INDEX_TAIL` on and the tailer within 3 min of real time, a wallet synced after the tailer started needs no API call even when `fresh`.
+
+**Full-chain tailer** (`INDEX_TAIL=tron,eth`, off by default): Tron via TronGrid USDT `Transfer` events in 60 s windows kept 2 min behind real time (the confirmation floor), Ethereum via `ETH_RPC_URL` `eth_getLogs` (12 confirmations). Starts at "now"; older history comes from per-wallet backfills. The Ethereum paths are code-complete but not live-tested.
 
 ---
 

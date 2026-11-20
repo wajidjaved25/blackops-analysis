@@ -1,5 +1,6 @@
 import { BadRequestException, BadGatewayException, NotFoundException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
+import { splitBoundary } from './index-rules';
 import { cacheGet, cacheSet } from './kv';
 
 export type Chain = 'tron' | 'eth';
@@ -9,6 +10,7 @@ export interface Transfer {
   to: string;
   amount: number; // USDT, 6 decimals applied
   timestamp: number; // ms
+  block?: number; // Ethereum only (TronGrid's per-account list has none)
 }
 export interface TransferRef {
   hash: string;
@@ -90,10 +92,19 @@ class HostState {
   }
 }
 const hosts = new Map<string, HostState>();
+
+/** Real upstream HTTP calls since boot (cache hits and Postgres reads are not counted) — lets the admin page prove what hit the API. */
+export const upstream = { calls: 0, byHost: {} as Record<string, number>, recent: [] as { t: number; url: string }[] };
+function countUpstream(host: string, url: string) {
+  upstream.calls++;
+  upstream.byHost[host] = (upstream.byHost[host] ?? 0) + 1;
+  upstream.recent.push({ t: Date.now(), url: url.replace(/apikey=[^&]*/, 'apikey=…') });
+  if (upstream.recent.length > 300) upstream.recent.shift();
+}
 const hostState = (h: string) => hosts.get(h) ?? hosts.set(h, new HostState()).get(h)!;
 
 /** Cached fetch, serialized per host with a gap to respect free-tier rate limits. `fresh` skips the cache read. */
-function fetchJson(url: string, init: RequestInit = {}, gapMs = 250, fresh = false): Promise<any> {
+export function fetchJson(url: string, init: RequestInit = {}, gapMs = 250, fresh = false): Promise<any> {
   const key = url + (init.body ?? '');
   const p = inflight.get(key);
   if (p && !fresh) return p;
@@ -112,11 +123,17 @@ async function fetchJsonUncached(key: string, url: string, init: RequestInit, ga
   await h.acquire(gapMs);
   let res: Response;
   try {
-    res = await fetch(url, init);
+    countUpstream(host, url);
+    res = await fetch(url, init).catch(async () => {
+      await sleep(500); // one retry for a dropped connection: a long backfill must survive a blip
+      countUpstream(host, url);
+      return fetch(url, init);
+    });
     // Free tiers rate-limit bursts: pause the whole host (not just this call) 1s, 2s, 4s, 8s before giving up.
     for (let i = 0; (res.status === 429 || res.status === 503) && i < 4; i++) {
       h.pauseUntil = Math.max(h.pauseUntil, Date.now() + 1000 * 2 ** i);
       await sleep(Math.max(0, h.pauseUntil - Date.now()));
+      countUpstream(host, url);
       res = await fetch(url, init);
     }
   } finally {
@@ -129,24 +146,27 @@ async function fetchJsonUncached(key: string, url: string, init: RequestInit, ga
 }
 
 // ---------- Tron (TRC20) ----------
-function tronHeaders(): Record<string, string> {
+export function tronHeaders(): Record<string, string> {
   const key = process.env.TRONGRID_API_KEY;
   return key ? { 'TRON-PRO-API-KEY': key } : {};
 }
-const tronGap = () => (process.env.TRONGRID_API_KEY ? 80 : 350);
+export const tronGap = () => (process.env.TRONGRID_API_KEY ? 80 : 350);
 
-async function tronTransfers(addr: string, max: number, fresh = false): Promise<Transfer[]> {
-  const out: Transfer[] = [];
+export interface PageOpts {
+  minTs?: number; // only rows at or after this ms timestamp (inclusive, so a tx is never split)
+  minBlock?: number; // Ethereum equivalent
+  fresh?: boolean;
+  pageSize?: number;
+}
+
+async function* tronPages(addr: string, o: PageOpts): AsyncGenerator<Transfer[]> {
   let url: string | undefined =
-    `${TRONGRID}/v1/accounts/${addr}/transactions/trc20?only_confirmed=true&limit=200&contract_address=${TRON_USDT}`;
-  while (url && out.length < max) {
-    const j = await fetchJson(url, { headers: tronHeaders() }, tronGap(), fresh);
-    for (const t of j.data ?? []) {
-      out.push({ hash: t.transaction_id, from: t.from, to: t.to, amount: Number(t.value) / 1e6, timestamp: t.block_timestamp });
-    }
+    `${TRONGRID}/v1/accounts/${addr}/transactions/trc20?only_confirmed=true&limit=200&contract_address=${TRON_USDT}` + (o.minTs ? `&min_timestamp=${o.minTs}` : '');
+  while (url) {
+    const j = await fetchJson(url, { headers: tronHeaders() }, tronGap(), o.fresh);
+    yield (j.data ?? []).map((t: any) => ({ hash: t.transaction_id, from: t.from, to: t.to, amount: Number(t.value) / 1e6, timestamp: t.block_timestamp }));
     url = j.meta?.links?.next;
   }
-  return out.slice(0, max);
 }
 
 async function tronBalance(addr: string): Promise<number> {
@@ -186,19 +206,29 @@ async function etherscan(params: string, fresh = false): Promise<any> {
   return j.result;
 }
 
-async function ethTransfers(addr: string, max: number, fresh = false): Promise<Transfer[]> {
-  // ponytail: one page only (Etherscan caps page*offset at 10k). Paginate by block range for whale wallets.
-  const rows = await etherscan(
-    `module=account&action=tokentx&contractaddress=${ETH_USDT}&address=${addr}&page=1&offset=${Math.min(max, 10000)}&sort=desc`,
-    fresh,
-  );
-  return (Array.isArray(rows) ? rows : []).map((t: any) => ({
-    hash: t.hash,
-    from: t.from,
-    to: t.to,
-    amount: Number(t.value) / 1e6,
-    timestamp: Number(t.timeStamp) * 1000,
-  }));
+async function* ethPages(addr: string, o: PageOpts): AsyncGenerator<Transfer[]> {
+  // Etherscan caps rows per call, so walk backwards block range by block range (newest first).
+  const offset = o.pageSize ?? 10000;
+  let end: number | null = null;
+  do {
+    const rows = await etherscan(
+      `module=account&action=tokentx&contractaddress=${ETH_USDT}&address=${addr}&page=1&offset=${offset}&sort=desc` +
+        (o.minBlock ? `&startblock=${o.minBlock}` : '') +
+        (end !== null ? `&endblock=${end}` : ''),
+      o.fresh,
+    );
+    const batch: Transfer[] = (Array.isArray(rows) ? rows : []).map((t: any) => ({
+      hash: t.hash,
+      from: t.from,
+      to: t.to,
+      amount: Number(t.value) / 1e6,
+      timestamp: Number(t.timeStamp) * 1000,
+      block: Number(t.blockNumber),
+    }));
+    const { keep, nextEnd } = splitBoundary(batch, batch.length >= offset);
+    yield keep;
+    end = nextEnd;
+  } while (end !== null);
 }
 
 async function ethBalance(addr: string): Promise<number> {
@@ -309,8 +339,29 @@ export async function ethFreezeEvents(fromBlock: number): Promise<{ events: Free
 
 // ---------- Public API ----------
 export const getTx = (c: Chain, hash: string) => (c === 'tron' ? tronTx(hash) : ethTx(hash.toLowerCase()));
-export const getTransfers = (c: Chain, a: string, max = 200, fresh = false) =>
-  c === 'tron' ? tronTransfers(a, max, fresh) : ethTransfers(a, max, fresh);
+/** Newest-first pages straight from the explorer API. Never touches Postgres. */
+export const apiPages = (c: Chain, a: string, o: PageOpts = {}) => (c === 'tron' ? tronPages(a, o) : ethPages(a, o));
+
+/** Live API read of the newest `max` transfers. */
+export async function apiTransfers(c: Chain, a: string, max: number, fresh = false): Promise<Transfer[]> {
+  const out: Transfer[] = [];
+  for await (const page of apiPages(c, a, { fresh, pageSize: Math.min(max, 10000) })) {
+    out.push(...page);
+    if (out.length >= max) break;
+  }
+  return out.slice(0, max);
+}
+
+/** Why a read happened. `graph` = a neighbour node: rows are written through but no backfill is queued. */
+export type Reason = 'lookup' | 'watch' | 'case' | 'manual' | 'graph';
+type ReadThrough = (c: Chain, a: string, max: number, fresh: boolean, reason: Reason) => Promise<Transfer[]>;
+let readThrough: ReadThrough | null = null;
+/** TransferIndex registers itself here at boot; before that (and in selfcheck) reads go straight to the API. */
+export const setReadThrough = (fn: ReadThrough | null) => void (readThrough = fn);
+
+/** THE choke point for address history: Postgres index when the wallet is covered, live API otherwise (see transfer-index.ts). */
+export const getTransfers = (c: Chain, a: string, max = 200, fresh = false, reason: Reason = 'lookup') =>
+  readThrough ? readThrough(c, a, max, fresh, reason) : apiTransfers(c, a, max, fresh);
 export const getBalance = (c: Chain, a: string) => (c === 'tron' ? tronBalance(a) : ethBalance(a));
 export const isTetherFrozen = (c: Chain, a: string) => (c === 'tron' ? tronFrozen(a) : ethFrozen(a));
 

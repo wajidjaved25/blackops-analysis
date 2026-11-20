@@ -6,10 +6,11 @@ import { audit, Ctx, Db } from './db';
 import { buildGraph, findPath, GetFlows, GraphNode, withVolumes } from './graph';
 import { LabelsService } from './labels';
 import { RiskService } from './risk';
+import { TransferIndex } from './transfer-index';
 import { topLabel } from './risk-score';
 import { int, parseAddr, toCsv } from './util';
 
-// ponytail: graph/path read only the latest 200 transfers per node. The Phase 7 indexer lifts this.
+// ponytail: graph/path read only the latest 200 transfers per node (from Postgres when the node is indexed, else the live API).
 const PER_NODE = 200;
 
 function time(raw: string | undefined): number | undefined {
@@ -27,8 +28,9 @@ interface Filter {
 const applyFilter = (ts: Transfer[], f: Filter) =>
   ts.filter((t) => (f.from === undefined || t.timestamp >= f.from) && (f.to === undefined || t.timestamp <= f.to) && (f.min === undefined || t.amount >= f.min));
 
-function flowsFor(chain: Chain, f: Filter, withTransfers: boolean): GetFlows {
-  return async (a) => flows(a, applyFilter(await getTransfers(chain, a, PER_NODE), f), withTransfers);
+function flowsFor(chain: Chain, f: Filter, withTransfers: boolean, root: string): GetFlows {
+  // the searched wallet is indexed (backfill queued); neighbour nodes are only written through
+  return async (a) => flows(a, applyFilter(await getTransfers(chain, a, PER_NODE, false, a === root ? 'lookup' : 'graph'), f), withTransfers);
 }
 
 @Controller()
@@ -37,6 +39,7 @@ export class InvestigateController {
     private db: Db,
     private labels: LabelsService,
     private risk: RiskService,
+    private index: TransferIndex,
   ) {}
 
   /** Adds the highest-risk label (name + category) to each graph node. */
@@ -61,6 +64,9 @@ export class InvestigateController {
     const times = transfers.map((t) => t.timestamp);
     const fl = flows(addr, transfers).slice(0, 25);
     const cpLabels = await this.labels.lookup(chain, fl.map((f) => f.address), orgId);
+    // Coverage is read after getTransfers, so a first visit already shows "indexing". Lifetime numbers only when the whole history is stored.
+    const cov = await this.index.coverage(chain, addr);
+    const lifetime = cov?.status === 'complete' ? await this.index.lifetime(chain, addr) : null;
     return {
       chain,
       address: addr,
@@ -75,6 +81,8 @@ export class InvestigateController {
       risk,
       counterparties: fl.map((f) => ({ ...f, label: topLabel(cpLabels.get(f.address) ?? []) })),
       transfers,
+      coverage: cov && { status: cov.status, rowCount: cov.rowCount, newestTs: cov.newestTs === null ? null : Number(cov.newestTs), lastSyncAt: cov.lastSyncAt },
+      lifetime,
     };
   }
 
@@ -136,7 +144,7 @@ export class InvestigateController {
     const filter = { from: time(from), to: time(to), min: min ? Number(min) : undefined };
     if (filter.min !== undefined && Number.isNaN(filter.min)) throw new BadRequestException('min must be a number');
     const withT = transfers === 'true';
-    const g = await buildGraph(addr, int(depth, 1, 1, 3), int(fanout, 8, 1, 15), flowsFor(chain, filter, withT));
+    const g = await buildGraph(addr, int(depth, 1, 1, 3), int(fanout, 8, 1, 15), flowsFor(chain, filter, withT, addr));
     const nodes = await this.labelNodes(chain, withT ? withVolumes(g.nodes, g.edges) : g.nodes, ctx.orgId);
     return { chain, nodes, edges: g.edges };
   }
@@ -149,7 +157,7 @@ export class InvestigateController {
     if (a.chain !== b.chain) throw new BadRequestException('Both addresses must be on the same chain');
     if (a.addr === b.addr) throw new BadRequestException('From and to are the same address');
     const withT = transfers === 'true';
-    const r = await findPath(a.addr, b.addr, int(maxHops, 4, 1, 6), int(fanout, 10, 1, 25), flowsFor(a.chain, {}, withT));
+    const r = await findPath(a.addr, b.addr, int(maxHops, 4, 1, 6), int(fanout, 10, 1, 25), flowsFor(a.chain, {}, withT, a.addr));
     return { chain: a.chain, ...r, nodes: await this.labelNodes(a.chain, withT ? withVolumes(r.nodes, r.edges) : r.nodes, ctx.orgId) };
   }
 }

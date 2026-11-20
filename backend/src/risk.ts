@@ -35,7 +35,7 @@ export class RiskService {
       const unflagged = fl.filter((f) => !labelsOf(f.address).some((l) => (WEIGHTS[l.category] ?? 0) > 0)).slice(0, INDIRECT_FANOUT);
       indirect = await Promise.all(
         unflagged.map(async (f) => {
-        const cfl = flows(f.address, await getTransfers(chain, f.address, 200));
+        const cfl = flows(f.address, await getTransfers(chain, f.address, 200, false, 'graph'));
         const cLabels = await this.labels.lookup(chain, cfl.map((x) => x.address), orgId);
         const r = scoreRisk({ own: [], frozen: false, flows: cfl.filter((x) => x.address !== address), labelsOf: (a) => cLabels.get(a) ?? [] });
         return { address: f.address, share: total ? (f.in + f.out) / total : 0, directScore: r.direct };

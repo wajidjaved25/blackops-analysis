@@ -40,7 +40,7 @@ export class ClusterWorker implements OnModuleInit {
   /** Finds deposit addresses of one hot wallet and stores them as pending suggestions. */
   private async cluster(hot: Hot, orgId: number): Promise<number> {
     const incoming = new Map<string, number>(); // sender -> volume into the hot wallet
-    for (const t of await getTransfers(hot.chain, hot.address, 300)) {
+    for (const t of await getTransfers(hot.chain, hot.address, 300, false, 'graph')) {
       if (norm(t.to) === norm(hot.address)) incoming.set(norm(t.from), (incoming.get(norm(t.from)) ?? 0) + t.amount);
     }
     const ranked = [...incoming].sort((a, b) => b[1] - a[1]).map(([a]) => a);
@@ -52,7 +52,7 @@ export class ClusterWorker implements OnModuleInit {
     let created = 0;
     for (const addr of candidates) {
       try {
-        const ev = depositEvidence(addr, await getTransfers(hot.chain, addr, 300), hot.address);
+        const ev = depositEvidence(addr, await getTransfers(hot.chain, addr, 300, false, 'graph'), hot.address);
         if (!ev) continue;
         const r = await this.db.clusterSuggestion.createMany({
           data: [{ orgId, chain: hot.chain, address: addr, name: `${hot.name} deposit`, category: 'exchange', confidence: clusterConfidence(ev), evidence: ev as any }],

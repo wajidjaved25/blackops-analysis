@@ -165,17 +165,44 @@ Verified on live Tron data unless noted. Full Playwright suite: 14/14 passing (s
 
 ---
 
-## Phase 7 — Scale (later)
+## Phase 7 — Scale
 
-- [ ] **7.1 USDT indexer** — stream all TRC20/ERC20 USDT transfers into Postgres (partitioned by month).
-- [ ] **7.2 Switch graph/path/monitoring** to read from the index.
-- [ ] **7.3 Cross-chain** — bridges, USDT↔TRX/ETH swaps.
-- [ ] **7.4 More assets/chains** — USDC, BSC, Solana.
+Plan written 2026-11-20. Default for D1 (data budget) = **free tier**, so the index is *targeted* (the wallets we care about), with full-chain tailing as an opt-in switch for when a paid key / own node exists. Order: 7A → 7B → 7C, one at a time, each verified before the next.
+
+### 7A — Own transfer index (7.1 + 7.2)
+- [x] **7.1 `Transfer` table** — chain, asset, hash, seq, from, to, amount (numeric), ts, block. Unique (chain, asset, hash, from, to, amount, seq) — TronGrid's per-account list has no log index, so `seq` = ordinal of identical rows in one tx. Indexes (chain, from, ts) and (chain, to, ts). Plain table, not partitioned: fine to ~100 M rows; monthly partitions when the full-chain tailer is turned on for real. *Built:* `amount` is `numeric(80,6)` (TRC20 USDT has emitted uint256-sized garbage values that overflow `numeric(38,6)`); extra index `(chain, ts)` is not used yet (reserved for time-range scans / partitioning).
+- [x] **7.2 `IndexedAddress` coverage** — per wallet: status (pending/backfilling/complete/capped/error), oldest/newest ts, row count, last sync, reason (lookup/watch/case/graph). Backfill job pages the whole history up to `INDEX_MAX_PER_ADDRESS` (default 50 000; above that the wallet is `capped` — exchanges have millions). *Built:* the backfill queue is the status column itself (`pending` → `backfilling` claimed with `FOR UPDATE SKIP LOCKED`, 2 workers, run from `jobs.every`) instead of the generic `Job` table, because the index is global and `Job` is per-org; crash recovery resets `backfilling` to `pending`. Reason `graph` = neighbour nodes: rows are written through but no backfill is queued.
+- [x] **7.3 Read-through** — `getTransfers()` is the single choke point: covered + fresh → Postgres; covered + stale → fetch only *newer* rows then Postgres; not covered → API as today, write the page through, queue a backfill. Graph, path, risk, monitoring, cases and attribution all switch over with no other change. *Verified on Tron; the Ethereum path (`startblock`/`endblock` paging) is code-complete but untested without `ETHERSCAN_API_KEY`.*
+- [x] **7.4 Lifetime numbers** — address page shows true lifetime in/out/counterparties from SQL when coverage is complete, and says "first N transfers (live API)" when not.
+- [x] **7.5 Monitoring on the index** — poller does an incremental sync instead of re-fetching 200 rows.
+- [~] **7.6 Full-chain tailer (opt-in)** — `INDEX_TAIL=tron,eth`: Tron via TronGrid contract events, Ethereum via `ETH_RPC_URL` `eth_getLogs`. Cursor table, lag + rows/min metrics. When on, watched wallets alert from the tailer (near real-time). Off by default: free TronGrid cannot keep up with ~2–3 M USDT transfers/day and the UI must say so. *Tron tailer run live for ~6 min (see Status); the Ethereum tailer (`eth_getLogs`) is code-complete but NOT run (no `ETH_RPC_URL`).*
+- [x] **7.7 Data index admin page** — totals, coverage table (search, re-sync, backfill, remove), tailer status/lag. New permission `index.manage` (Owner, Admin).
+- [x] **7.8 Checks** — self-check: dedupe/seq, read-through decisions, incremental sync; Playwright spec for the admin page. Acceptance: after one backfill, a depth-2 graph on that wallet loads with zero TronGrid calls; index survives a restart; a watchlist alert still fires.
+
+**Status (7A, 2026-11-20):** built and verified on live Tron data; Ethereum code paths untested. Measurements (wallet `TWVNcs5uDiPAivNNmiPyQ2HsaBpLR6v6rK`, dormant frozen wallet, 7,131 transfers): full backfill ≈ 40–65 s (36 pages at free-TronGrid pace), `IndexedAddress` complete with `rowCount = 7131` = API row count; survives a backend restart; depth-2 graph: root read from Postgres (0 TronGrid calls mentioning the root; neighbours still hit the API: 8 wallets, ~19–20 HTTP attempts incl. 429 retries) — cold run 34 s (one cold run returned 502 from TronGrid 429s after the 4 back-offs, the pre-existing free-tier limit), 3.7 s once neighbours are in the Redis cache. Incremental sync = 1 call with `min_timestamp`. Watchlist alert fires through the index (3 alerts via sync-then-db). Tron tailer: ≈1.9 k rows/min (≈2.7 M/day), lag ≈ 2 min (the confirmation floor), kept up on free TronGrid for ~6 min. Tailer is OFF by default. Neighbour (graph) wallets are *not* backfilled automatically — that would queue ~70 backfills per depth-2 graph.
+
+### 7B — More assets and chains (7.4 in the old list)
+- [ ] **7.9 Asset registry** — {chain, asset, contract, decimals, freeze method}: Tron USDT/USDC, Ethereum USDT/USDC, BSC USDT/USDC (18 decimals, via Etherscan v2 `chainid=56`). `asset` flows through every API (`?asset=usdt|usdc|all`, default all) and the Transfer table.
+- [ ] **7.10 BSC** — `0x` addresses are ambiguous (Ethereum or BSC): explicit chain selector in search/address/graph, default Ethereum, remembered per case.
+- [ ] **7.11 Freeze/blacklist per asset** — Tether `isBlackListed` (Tron, Ethereum), Circle `isBlacklisted` (USDC) + Circle blacklist events into `source=circle` labels. BSC pegged tokens have no issuer freeze — UI says "not applicable".
+- [ ] **7.12 UI** — asset filter chips on address/graph/screening/monitoring; edges coloured by asset; volumes in USD (both stablecoins ≈ $1, stated).
+- Solana: **not in this phase** — different address/account model (SPL token accounts) and needs a Solana RPC; parked in Backlog.
+
+### 7C — Cross-chain
+- [ ] **7.13 Categories** `bridge` and `dex` (weight 0, informational, like exchange). No bundled addresses unless taken from an official page fetched in-session, with that URL stored as the label source (rule 5: never fabricate labels).
+- [ ] **7.14 Swap detection** — in one tx, stablecoin out + native coin (TRX/ETH/BNB) back, or stablecoin in from a `dex` → mark "swap to TRX/ETH/BNB" on the tx page and as a terminal marker on the graph ("funds left USDT here").
+- [ ] **7.15 Bridge hop finder** — outflow to a `bridge` wallet on chain A → search outflows from `bridge` wallets on chain B within a time window and amount tolerance (fee). Ranked candidates with a confidence and the evidence shown; never auto-asserted.
+- [ ] **7.16 Multi-chain graph** — node ids carry the chain; dashed "cross-chain (heuristic)" edges; "Find cross-chain continuation" action on bridge nodes; accepted hops can be saved to a case.
+- [ ] **7.17 Checks** — self-check for swap and bridge matching on crafted data; Playwright for the graph action.
+
+**Phase acceptance:** see each block. Ethereum/BSC parts are code-complete but only live-tested once `ETHERSCAN_API_KEY` is set.
 
 ---
 
 ## Backlog (ideas parked here, not in scope yet)
 
+- Solana (SPL USDT/USDC) — needs Solana RPC and token-account model.
+- Native-coin tracing after a swap (follow TRX/ETH onward).
 -
 
 ## Open decisions (see plan.md §11)

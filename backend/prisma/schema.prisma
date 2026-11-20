@@ -269,3 +269,55 @@ model ClusterSuggestion {
 
   @@unique([orgId, chain, address, name])
 }
+
+// ---------- Own transfer index (Phase 7A) ----------
+// Global chain data (not org-scoped). One row per token transfer; `seq` = ordinal of identical
+// (hash, from, to, amount) rows within one tx, because TronGrid's per-account list has no log index.
+
+model Transfer {
+  id     BigInt  @id @default(autoincrement())
+  chain  String // tron | eth
+  asset  String  @default("usdt")
+  hash   String
+  seq    Int     @default(0)
+  from   String
+  to     String
+  amount Decimal @db.Decimal(80, 6) // wide enough for uint256-sized garbage values some contracts emit
+  ts     BigInt // ms since epoch
+  block  BigInt?
+
+  @@unique([chain, asset, hash, from, to, amount, seq])
+  @@index([chain, from, ts])
+  @@index([chain, to, ts])
+  @@index([chain, ts])
+}
+
+/// Which wallets have their full history in Transfer. status: pending | backfilling | complete | capped | error
+model IndexedAddress {
+  id         Int       @id @default(autoincrement())
+  chain      String
+  address    String
+  status     String    @default("pending")
+  reason     String    @default("lookup") // lookup | watch | case | manual
+  rowCount   Int       @default(0)
+  oldestTs   BigInt?
+  newestTs   BigInt?
+  lastSyncAt DateTime?
+  error      String?
+  createdAt  DateTime  @default(now())
+
+  @@unique([chain, address])
+  @@index([status])
+}
+
+/// Full-chain tailer position. cursor = ms timestamp (tron) or block number (eth).
+/// `since` = ms when the tailer started; every transfer after it is in the table, so wallets synced after it need no API call.
+model IndexCursor {
+  chain     String   @id
+  cursor    BigInt
+  cursorTs  BigInt // ms of the newest data indexed
+  since     BigInt
+  rowsTotal BigInt   @default(0)
+  error     String?
+  updatedAt DateTime @updatedAt
+}

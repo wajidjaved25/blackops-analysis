@@ -105,7 +105,7 @@ export class MonitorService implements OnModuleInit {
 
   private async check(it: Prisma.WatchItemGetPayload<{ include: { watchlist: { include: { rules: true } } } }>): Promise<number> {
     const chain = it.chain as Chain;
-    const history = await getTransfers(chain, it.address, 200, true);
+    const history = await getTransfers(chain, it.address, 200, true, 'watch');
     const newest = history.reduce((m, t) => Math.max(m, t.timestamp), 0);
     const now = new Date();
 

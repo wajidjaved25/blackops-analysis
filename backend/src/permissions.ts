@@ -20,6 +20,7 @@ export const PERMISSIONS = [
   { key: 'roles.manage', group: 'Platform', label: 'Manage roles', description: 'Create, edit and delete custom roles' },
   { key: 'apikeys.manage', group: 'Platform', label: 'Manage API keys', description: 'Create and revoke API keys' },
   { key: 'audit.view', group: 'Platform', label: 'View audit log', description: 'Read the audit log' },
+  { key: 'index.manage', group: 'Platform', label: 'Manage data index', description: 'Transfer index coverage, backfills, re-sync and tailer status' },
   { key: 'org.manage', group: 'Platform', label: 'Manage organisation', description: 'Name, require 2FA, session lifetime' },
 ] as const;
 

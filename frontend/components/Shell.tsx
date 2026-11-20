@@ -1,5 +1,5 @@
 'use client';
-import { Activity, Bell, Briefcase, ChevronDown, Fingerprint, FolderKanban, History, KeyRound, LayoutDashboard, LogOut, Menu, Moon, Network, PanelLeft, ScanSearch, Search, ShieldCheck, Sun, Tag, UserCog, Users, Building2, X, Eye } from 'lucide-react';
+import { Activity, Bell, Briefcase, ChevronDown, Fingerprint, FolderKanban, Database, History, KeyRound, LayoutDashboard, LogOut, Menu, Moon, Network, PanelLeft, ScanSearch, Search, ShieldCheck, Sun, Tag, UserCog, Users, Building2, X, Eye } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
@@ -32,6 +32,7 @@ const NAV: { group: string; items: Item[] }[] = [
     { href: '/admin/roles', label: 'Roles', icon: <UserCog size={18} />, perm: ['roles.manage', 'users.manage'] },
     { href: '/admin/api-keys', label: 'API keys', icon: <KeyRound size={18} />, perm: 'apikeys.manage' },
     { href: '/admin/audit', label: 'Audit log', icon: <History size={18} />, perm: 'audit.view' },
+    { href: '/admin/index', label: 'Data index', icon: <Database size={18} />, perm: 'index.manage' },
     { href: '/admin/notifications', label: 'Notifications', icon: <Activity size={18} />, perm: 'notify.manage' },
     { href: '/admin/org', label: 'Organisation', icon: <Building2 size={18} />, perm: 'org.manage' },
   ] },

@@ -5,6 +5,7 @@ import { buildGraph, findPath } from './graph';
 import { level, scoreRisk } from './risk-score';
 import { clusterConfidence, depositEvidence } from './cluster';
 import { withVolumes } from './graph';
+import { planRead, splitBoundary, tailEnd, withSeq } from './index-rules';
 import { evaluateRules } from './monitor-rules';
 import { ALL_PERMS, hasAny, missing, PERMISSIONS, SYSTEM_ROLES } from './permissions';
 import { graphAddresses, pickSources, timelineHops } from './timeline';
@@ -204,6 +205,34 @@ async function main() {
   assert.equal(depositEvidence('TDep', deposit.slice(0, 2).concat(deposit.slice(3)), HOT), null); // only 2 depositors
   assert.equal(depositEvidence('TDep', [ct('U1', 'TDep', 5), ct('U2', 'TDep', 5), ct('U3', 'TDep', 5)], HOT), null); // never forwards anything
   assert.equal(depositEvidence('TDep', [ct(HOT, 'TDep', 5), ct('U2', 'TDep', 5), ct('U3', 'TDep', 5), ct('TDep', HOT, 10)], HOT), null); // the hot wallet itself is not a depositor
+
+  // --- transfer index (7A): seq dedupe, read-through decisions, incremental sync, block-range paging ---
+  const tr = (hash: string, amount: number, from = 'A', to = 'B') => ({ hash, from, to, amount, timestamp: 1 });
+  // two identical transfers in one tx get seq 0,1; a different amount or tx restarts at 0; re-running gives the same keys
+  const seqd = withSeq([tr('h1', 5), tr('h1', 5), tr('h1', 6), tr('h2', 5), tr('h1', 5)]);
+  assert.deepEqual(seqd.map((r) => r.seq), [0, 1, 0, 0, 2]);
+  assert.deepEqual(withSeq([tr('h1', 5), tr('h1', 5), tr('h1', 6), tr('h2', 5), tr('h1', 5)]).map((r) => r.seq), [0, 1, 0, 0, 2]); // deterministic -> idempotent re-insert
+  const carry = new Map<string, number>(); // same tx split over two pages keeps counting
+  assert.deepEqual([...withSeq([tr('h', 1)], carry), ...withSeq([tr('h', 1)], carry)].map((r) => r.seq), [0, 1]);
+  const tnow = 1_000_000;
+  const cov = (status: string, rowCount = 100, ageMs = 1000) => ({ status, rowCount, lastSyncAt: new Date(tnow - ageMs) });
+  assert.equal(planRead(null, 200, false, tnow, 300_000), 'api'); // not covered -> live API
+  for (const st of ['pending', 'backfilling', 'error']) assert.equal(planRead(cov(st), 200, false, tnow, 300_000), 'api'); // partial coverage is never trusted
+  assert.equal(planRead(cov('complete'), 200, false, tnow, 300_000), 'db'); // covered + fresh -> Postgres only
+  assert.equal(planRead(cov('complete', 100, 400_000), 200, false, tnow, 300_000), 'sync-then-db'); // stale -> fetch only newer rows
+  assert.equal(planRead(cov('complete'), 200, true, tnow, 300_000), 'sync-then-db'); // monitoring asks for fresh
+  assert.equal(planRead({ status: 'complete', rowCount: 1, lastSyncAt: null }, 200, false, tnow, 300_000), 'sync-then-db'); // never synced
+  assert.equal(planRead(cov('capped', 50_000), 2000, false, tnow, 300_000), 'db'); // capped holds the newest N: enough for small reads
+  assert.equal(planRead(cov('capped', 1000), 2000, false, tnow, 300_000), 'api'); // ...not for reads wanting more than it holds
+  // Etherscan-style newest-first batches: a full batch drops its possibly-cut oldest block and restarts there
+  const eb = (block: number) => ({ block });
+  assert.deepEqual(splitBoundary([eb(9), eb(9), eb(8), eb(7), eb(7)], true), { keep: [eb(9), eb(9), eb(8)], nextEnd: 7 });
+  assert.deepEqual(splitBoundary([eb(9), eb(8)], false), { keep: [eb(9), eb(8)], nextEnd: null }); // short batch = history exhausted
+  assert.deepEqual(splitBoundary([eb(5), eb(5)], true), { keep: [eb(5), eb(5)], nextEnd: 4 }); // one block bigger than a page: keep it, step below
+  // tailer windows never enter the unconfirmed tail
+  assert.equal(tailEnd(0, 1_000_000, 60_000, 120_000), 59_999);
+  assert.equal(tailEnd(900_000, 1_000_000, 60_000, 120_000), 880_000); // end < cursor -> caught up
+  assert.ok(PERMISSIONS.some((p) => p.key === 'index.manage') && SYSTEM_ROLES.find((r) => r.name === 'Admin')!.permissions.includes('index.manage') && !SYSTEM_ROLES.find((r) => r.name === 'Analyst')!.permissions.includes('index.manage'));
 
   // --- SSRF guard ---
   assert.ok(['127.0.0.1', '10.1.2.3', '172.16.0.1', '192.168.1.1', '169.254.169.254', '::1', 'fd00::1', '::ffff:10.0.0.1'].every(privateIp));

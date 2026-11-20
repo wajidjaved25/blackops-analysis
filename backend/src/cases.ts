@@ -85,7 +85,7 @@ export class CasesService {
     const rows = new Map<string, { hash: string; from: string; to: string; amount: number; timestamp: number }>();
     for (const w of checked) {
       try {
-        for (const t of await getTransfers(w.chain, w.address, 500)) {
+        for (const t of await getTransfers(w.chain, w.address, 500, false, 'case')) {
           if (inCase.has(w.chain + norm(t.from)) && inCase.has(w.chain + norm(t.to))) rows.set(`${t.hash}|${t.from}|${t.to}|${t.amount}`, t);
         }
       } catch (e) {
