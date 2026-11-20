@@ -215,3 +215,9 @@ Plan written 2026-11-20. Default for D1 (data budget) = **free tier**, so the in
 ## Open decisions (see plan.md §11)
 
 - [ ] D1 data budget · [ ] D2 users · [ ] D3 hosting · [ ] D4 phase order
+
+## Status 2026-11-20 — staging (https://analysis.publicvm.com)
+Deployed with PM2 + Apache (`deploy/DEPLOY-pm2-apache.md`). **Ethereum was live-tested for the first time on staging, with keys set:**
+- USDT and USDC transfers, balances, tx detail and live `isBlackListed` all work.
+- Freeze/sanctions syncs on Ethereum: Tether 1,516 events → 1,086 frozen labels; Circle 1,192 events → 712 labels; OFAC 127.
+- **BNB Chain:** Etherscan's free plan refuses `chainid=56` ("Free API access is not supported for this chain"), so BNB Chain needs a paid Etherscan plan or another data source.
