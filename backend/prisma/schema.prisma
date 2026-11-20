@@ -221,6 +221,7 @@ model Case {
   notes       CaseNote[]
   files       CaseFile[]
   txs         CaseTransaction[]
+  analyses    CaseAnalysis[]
 }
 
 model CaseAddress {
@@ -360,4 +361,24 @@ model IndexCursor {
   rowsTotal BigInt   @default(0)
   error     String?
   updatedAt DateTime @updatedAt
+}
+
+/// One run of the case analysis (8B). `result` is the stored report the UI and the printable report read; a new run is a new row.
+model CaseAnalysis {
+  id          Int       @id @default(autoincrement())
+  caseId      Int
+  case        Case      @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  status      String    @default("queued") // queued | running | done | failed
+  stage       String    @default("")
+  params      Json
+  result      Json?
+  error       String?
+  progress    Int       @default(0)
+  total       Int       @default(0)
+  jobId       Int?
+  createdById Int?
+  createdAt   DateTime  @default(now())
+  finishedAt  DateTime?
+
+  @@index([caseId, id])
 }

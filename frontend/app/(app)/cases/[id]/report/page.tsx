@@ -5,6 +5,7 @@ import { RequirePerm } from '@/components/Guard';
 import { Button, ErrorState, LinkButton, SkeletonRows } from '@/components/ui';
 import { exact, num, short } from '@/lib/format';
 import { useApi } from '@/lib/hooks';
+import { Analysis, AnalysisReportSection, Result } from '@/components/CaseAnalysis';
 import { OFF_CHAIN_NOTE, STATUS, TxList } from '@/components/CaseTransactions';
 
 interface Report {
@@ -22,6 +23,7 @@ export default function ReportPage() {
   const { data: r, loading, error, status, reload } = useApi<Report>(`/cases/${id}/report`);
   const c = useApi<{ graphPng?: string }>(`/cases/${id}`);
   const txs = useApi<TxList>(`/cases/${id}/transactions?limit=1000`);
+  const an = useApi<Analysis & { result: Result }>(`/cases/${id}/analyses/latest`); // 404 when no analysis was run: the section is then simply absent
   const png = r?.case.graphPng || c.data?.graphPng;
   return (
     <RequirePerm perm="export.data">
@@ -64,6 +66,7 @@ export default function ReportPage() {
                 {txs.data.count > txs.data.rows.length && <p className="muted">Showing the first {txs.data.rows.length} of {txs.data.count} rows; the full list is in the CSV export.</p>}
               </>
             )}
+            {an.data?.result && <AnalysisReportSection a={an.data as Analysis & { result: Result }} />}
             <h2>Key transfers</h2>
             {r.timeline.length === 0 ? <p className="muted">No transfers between the case addresses were found.</p> : (
               <table><thead><tr><th>Time</th><th>Hop</th><th>From</th><th>To</th><th>Asset</th><th className="num">Amount</th><th>Transaction</th></tr></thead><tbody>

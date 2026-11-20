@@ -20,8 +20,9 @@ test('address page: asset chips filter USDT / USDC and the Tron USDC note shows'
   await expect(chip(page, 'Asset', 'All')).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByText(/issuer support ended/).first()).toBeVisible(); // Tron USDC row in the Assets card
   const transfers = page.getByRole('table', { name: 'Transfers' });
-  // combined: both assets appear
-  await expect(transfers.getByText('USDC').first()).toBeVisible();
+  // combined: both assets are reported by the Assets card; the Transfers table is newest-first and Tron USDC is historical, so once the wallet has 25+ newer USDT
+  // transfers page 1 holds no USDC row (that was this test's live-data assumption: USDC is checked through the USDC filter below).
+  await expect(page.getByRole('table', { name: 'Assets' }).getByText('USDC').first()).toBeVisible();
   await expect(transfers.getByText('USDT').first()).toBeVisible();
 
   await chip(page, 'Asset', 'USDC').click();

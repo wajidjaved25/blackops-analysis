@@ -8,6 +8,7 @@ import { RequirePerm } from '@/components/Guard';
 import { ConfirmDialog } from '@/components/Modal';
 import { AddressLink, RiskBadge, TxLink } from '@/components/Risk';
 import { Table } from '@/components/Table';
+import { AnalysisTab } from '@/components/CaseAnalysis';
 import { TransactionsTab } from '@/components/CaseTransactions';
 import { useToast } from '@/components/Toast';
 import { RadialHeatmap } from '@/components/charts';
@@ -21,7 +22,7 @@ import { useApi } from '@/lib/hooks';
 interface CA { id: number; chain: string; address: string; role: string; note?: string }
 interface Case { id: number; title: string; description?: string; status: string; createdAt: string; updatedAt: string; graphJson?: unknown; graphPng?: string; addresses: CA[]; notes: { id: number; body: string; author?: { name?: string; email?: string } | string; createdAt: string }[]; files: { id: number; name: string; size: number; mime: string; createdAt: string }[] }
 interface TL { hash: string; from: string; to: string; amount: number; asset?: string; timestamp: number; hop: number | null }
-type Tab = 'overview' | 'addresses' | 'transactions' | 'graph' | 'timeline' | 'notes' | 'files';
+type Tab = 'overview' | 'addresses' | 'transactions' | 'analysis' | 'graph' | 'timeline' | 'notes' | 'files';
 const authorName = (a: Case['notes'][number]['author']) => (typeof a === 'string' ? a : a?.name || a?.email || 'Unknown');
 const size = (n: number) => (n > 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1e3))} KB`);
 
@@ -54,7 +55,7 @@ export default function CaseDetail() {
         {error && <div className="card"><ErrorState error={error} status={status} onRetry={reload} /></div>}
         {c && (
           <>
-            <Tabs value={tab} onChange={setTab} tabs={[{ id: 'overview', label: 'Overview' }, { id: 'addresses', label: 'Addresses', count: c.addresses.length }, { id: 'transactions', label: 'Transactions' }, { id: 'graph', label: 'Graph' }, { id: 'timeline', label: 'Timeline' }, { id: 'notes', label: 'Notes', count: c.notes.length }, { id: 'files', label: 'Files', count: c.files.length }]} />
+            <Tabs value={tab} onChange={setTab} tabs={[{ id: 'overview', label: 'Overview' }, { id: 'addresses', label: 'Addresses', count: c.addresses.length }, { id: 'transactions', label: 'Transactions' }, { id: 'analysis', label: 'Analysis' }, { id: 'graph', label: 'Graph' }, { id: 'timeline', label: 'Timeline' }, { id: 'notes', label: 'Notes', count: c.notes.length }, { id: 'files', label: 'Files', count: c.files.length }]} />
             <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`}>
               {tab === 'overview' && (
                 <Card title="Overview" actions={manage && !edit && <Button sm onClick={() => setEdit({ title: c.title, description: c.description ?? '' })}>Edit</Button>}>
@@ -74,6 +75,7 @@ export default function CaseDetail() {
               )}
               {tab === 'addresses' && <Addresses c={c} manage={manage} act={act} />}
               {tab === 'transactions' && <TransactionsTab id={id} />}
+              {tab === 'analysis' && <AnalysisTab id={id} />}
               {tab === 'graph' && (
                 <Card title="Graph snapshot" actions={<LinkButton href={`/graph?case=${id}`} variant="primary" sm disabled={!c.graphJson}><Network size={14} />Open in graph</LinkButton>}>
                   {c.graphPng ? <img src={c.graphPng} alt="Saved fund-flow graph" style={{ maxWidth: '100%', borderRadius: 8, border: '1px solid var(--border)' }} /> : <EmptyState icon={<Network size={22} />} title="No graph saved" action={<LinkButton href="/graph" sm>Open graph workspace</LinkButton>}>Build a graph in the workspace and use “Save to case”.</EmptyState>}

@@ -19,6 +19,7 @@ import ExcelJS from 'exceljs';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { busyFindings, BUSY_REASON, consolidations, DEFAULT_PARAMS, exchangeFindings, exposureFindings, internalTransfers, linkChart, nearThreshold, passThrough, pathText, pathTo, repeatedAmounts, Row, trace, unusualHours, walletTable } from './analysis-rules';
 import { assetParam, parseAddr, parseCsv, privateIp, toCsv } from './util';
 
 async function main() {
@@ -401,6 +402,128 @@ async function main() {
     assert.deepEqual([g.sheet, g.grid.length, g.grid[2][3], g.grid[2][6]], ['Withdrawals', 3, 2, 'a'.repeat(64)]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+
+  {
+  // --- case analysis (8B): pattern rules on crafted rows ---
+  const H = 3_600_000;
+  const T0 = Date.UTC(2026, 0, 5, 12, 0, 0);
+  const row = (i: number, amount: number, hoursAfter = i, over: Partial<Row> = {}): Row => ({ id: i, chain: 'tron', hash: `h${i}`, ref: null, address: 'W' + (i % 2), coin: 'USDT', amount, at: T0 + hoursAfter * H, offChain: false, status: 'verified', ...over });
+  const rep = repeatedAmounts([row(1, 500), row(2, 500), row(3, 500), row(4, 501), row(5, 9)], 3);
+  assert.equal(rep.length, 1);
+  assert.deepEqual([rep[0].type, rep[0].evidenceTotal, rep[0].severity], ['repeated_amount', 3, 'low']);
+  assert.ok(rep[0].statement.includes('500') && rep[0].evidence.every((e) => e.hash));
+  assert.equal(repeatedAmounts([row(1, 500), row(2, 500)], 3).length, 0); // two are not enough
+  assert.equal(repeatedAmounts([row(1, 500), row(2, 500, 2, { coin: 'USDC' }), row(3, 500)], 3).length, 0); // coin is part of the key
+  const near = nearThreshold([row(1, 9_995), row(2, 9_990), row(3, 9_989.9), row(4, 10_000), row(5, 49_960), row(6, 14_999)], [10_000, 15_000, 50_000], 0.1);
+  assert.deepEqual(near.map((f) => [f.type, f.evidenceTotal]), [['near_threshold', 2]]); // 9,995 + 9,990 only: 9,989.9 is too low, 10,000 is not under, 49,960 / 14,999 are single
+  assert.equal(nearThreshold([row(1, 49_960), row(2, 49_990)], [50_000], 0.1).length, 1);
+  const night = { nightFrom: 0, nightTo: 6, nightShare: 0.4, nightMin: 5, tzMin: 0 };
+  const nightRows = [1, 2, 3, 4, 5, 6].map((i) => row(i, 10, 0, { at: Date.UTC(2026, 0, i, 2, 30) })).concat([row(7, 10, 0, { at: Date.UTC(2026, 0, 7, 14) })]);
+  assert.equal(unusualHours(nightRows, night)[0].evidenceTotal, 6);
+  assert.equal(unusualHours(nightRows, { ...night, tzMin: 8 * 60 }).length, 0); // 02:30 UTC is 10:30 in UTC+8: not night any more
+  assert.equal(unusualHours(nightRows.slice(0, 4), night).length, 0); // fewer than nightMin
+  assert.equal(unusualHours([...nightRows, ...[10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20].map((i) => row(i, 1, 0, { at: Date.UTC(2026, 0, i, 15) }))], night).length, 0); // share below 40%
+  assert.equal(unusualHours(nightRows, { ...night, nightFrom: 22, nightTo: 3 })[0].evidenceTotal, 6); // window wrapping midnight
+  const off = internalTransfers([row(1, 100, 1, { offChain: true, hash: null, ref: 'Off-chain transfer 1' }), row(2, 50)]);
+  assert.deepEqual([off[0].type, off[0].severity, off[0].evidenceTotal, off[0].evidence[0].ref], ['internal_transfer', 'info', 1, 'Off-chain transfer 1']);
+  assert.ok(off[0].statement.includes('legal process'));
+  const wt = walletTable([row(1, 100, 1), row(2, 50, 2, { address: 'W0', status: 'mismatch' }), row(3, 30, 3, { address: 'W1' }), row(4, 5, 4, { offChain: true, hash: null })]);
+  assert.deepEqual([wt[0].address, wt[0].total, wt[0].verified, wt[0].count, wt[0].share], ['W1', 130, 130, 2, 130 / 185]); // share is of everything claimed, off-chain rows included
+  assert.deepEqual([wt[1].address, wt[1].verified], ['W0', 0]);
+
+  // --- pass-through ---
+  const xt = (hash: string, from: string, to: string, amount: number, hoursAfter: number): Transfer => ({ asset: 'usdt', hash, from, to, amount, timestamp: T0 + hoursAfter * H });
+  const pt = passThrough('P', [xt('in1', 'X', 'P', 1000, 0), xt('o1', 'P', 'Y', 600, 1), xt('o2', 'P', 'Z', 395, 2), xt('in2', 'X', 'P', 500, 100), xt('o3', 'P', 'Y', 100, 101), xt('in3', 'X', 'P', 500, 200), xt('o4', 'P', 'Y', 500, 300)], 0.9, 24);
+  assert.deepEqual(pt.map((e) => [e.inHash, e.forwarded, e.outHashes]), [['in1', 995, ['o1', 'o2']]]); // in2: only 20% left; in3: sent after 100 h
+  assert.equal(passThrough('P', [xt('in1', 'X', 'P', 100, 0), xt('o1', 'P', 'Y', 100, 1)], 0.9, 24).length, 1);
+  assert.equal(passThrough('P', [xt('in1', 'X', 'P', 100, 0), xt('in2', 'X', 'P', 100, 0.5), xt('o1', 'P', 'Y', 100, 1)], 0.9, 24).length, 1); // one outflow cannot satisfy two inflows
+
+  // --- trace: bounds, partial reporting, stops, path extraction ---
+  // S1 -> A -> {EX (labelled Binance), D1 -> D2}, S1 -> B -> C -> C2, S2 -> BUSY (capped index), S1 -> SAN (sanctioned)
+  const ledger: Transfer[] = [
+    xt('s1a', 'S1', 'A', 900, 1), xt('s1b', 'S1', 'B', 80, 1), xt('s1san', 'S1', 'SAN', 10, 2), xt('old', 'S1', 'OLD', 5, -50), // OLD predates the funds: not followed
+    xt('aex', 'A', 'EX', 880, 2), xt('ad1', 'A', 'D1', 15, 2), xt('bc', 'B', 'C', 70, 3), xt('cc2', 'C', 'C2', 60, 4), xt('d1d2', 'D1', 'D2', 15, 3),
+    xt('s2busy', 'S2', 'BUSY', 300, 5), xt('exout', 'EX', 'LEAK', 1, 6), xt('busyout', 'BUSY', 'LEAK2', 1, 6), xt('in-before', 'FUND', 'S1', 1000, 0),
+  ];
+  const calls: string[] = [];
+  const lb = (n: string, c: string, source = 'test') => ({ name: n, category: c, source, confidence: 1 });
+  const labelDb: Record<string, ReturnType<typeof lb>[]> = { EX: [lb('Binance', 'exchange', 'official')], SAN: [lb('OFAC', 'sanctioned', 'ofac')] };
+  const mkDeps = (over: Partial<Parameters<typeof trace>[2]> = {}): Parameters<typeof trace>[2] => ({
+    transfers: async (_c, a) => (calls.push(a), ledger.filter((t) => t.from === a || t.to === a)),
+    labels: async (_c, addrs) => new Map(addrs.filter((a) => labelDb[a]).map((a) => [a, labelDb[a]])),
+    capped: async (_c, addrs) => new Set(addrs.filter((a) => a === 'BUSY')),
+    ...over,
+  });
+  const seedsA = [{ chain: 'tron', address: 'S1', after: T0 }, { chain: 'tron', address: 'S2', after: T0 }];
+  const P = { hops: 3, fanout: 5, maxWallets: 50, budgetSec: 60, busyTransfers: 200 };
+  const res = await trace(seedsA, P, mkDeps());
+  assert.ok(!calls.includes('EX') && !calls.includes('BUSY') && !calls.includes('SAN')); // exchange-labelled, capped and risk-labelled wallets are never fetched (no backfill) or expanded
+  assert.ok(!res.nodes.has('tron|LEAK') && !res.nodes.has('tron|LEAK2')); // nothing past an endpoint
+  assert.ok(!res.nodes.has('tron|OLD')); // history before the funds arrived is not followed
+  assert.equal(res.nodes.get('tron|EX')!.stop, 'exchange');
+  assert.equal(res.nodes.get('tron|BUSY')!.stop, 'busy');
+  assert.equal(res.nodes.get('tron|BUSY')!.stopReason, BUSY_REASON);
+  assert.equal(res.nodes.get('tron|SAN')!.stop, 'risk');
+  assert.ok(res.nodes.has('tron|D2') && res.nodes.has('tron|C2')); // hop 3 reached
+  assert.equal(res.stats.walletsTotal, res.nodes.size);
+  assert.equal(res.stats.walletsTraced, 6); // S1, S2, A, B, D1, C (EX, BUSY, SAN are stops; D2 / C2 are at hop 3: discovered, not expanded)
+  assert.ok(res.stats.hopLimit && !res.stats.timedOut && !res.stats.walletCap && res.stats.fanoutCut === 0);
+  // path extraction to the exchange endpoint
+  assert.deepEqual(pathTo(res.nodes, 'tron|EX').map((s) => s.address), ['S1', 'A', 'EX']);
+  assert.equal(pathTo(res.nodes, 'tron|EX')[2].via!.hash, 'aex');
+  assert.equal(pathText(pathTo(res.nodes, 'tron|EX')), 'S1 → A → EX (Binance)');
+  const ex = exchangeFindings(res.nodes);
+  assert.equal(ex.length, 1);
+  assert.deepEqual([ex[0].type, ex[0].severity], ['exchange_endpoint', 'medium']);
+  assert.ok(ex[0].statement.includes('Binance') && ex[0].statement.includes('legal process') && ex[0].statement.includes('S1 → A → EX'));
+  assert.ok(ex[0].evidence.some((e) => e.kind === 'tx' && e.hash === 'aex') && ex[0].evidence.some((e) => e.kind === 'wallet' && e.address === 'EX'));
+  const risk = exposureFindings(res.nodes);
+  assert.deepEqual([risk.length, risk[0].severity, risk[0].statement.includes('sanctioned')], [1, 'high', true]);
+  assert.equal(busyFindings(res.nodes)[0].type, 'busy_endpoint');
+  assert.ok(busyFindings(res.nodes)[0].statement.includes('No exchange is named'));
+  const chart = linkChart([], res, { count: 2, amount: 7 });
+  assert.ok(chart.nodes.some((n) => n.id === 'offchain') && chart.edges.some((e) => e.source === 'tron|S1' && e.target === 'tron|A'));
+  // bounds: hops
+  const r1 = await trace(seedsA, { ...P, hops: 1 }, mkDeps());
+  assert.ok(!r1.nodes.has('tron|D1') && r1.stats.walletsTraced === 2 && r1.stats.hopLimit && r1.nodes.has('tron|A'));
+  // bounds: fan-out per wallet keeps the biggest counterparties and says so
+  const r2 = await trace([seedsA[0]], { ...P, hops: 1, fanout: 2 }, mkDeps());
+  assert.deepEqual([...r2.nodes.keys()].sort(), ['tron|A', 'tron|B', 'tron|S1']);
+  assert.deepEqual([r2.stats.fanoutCut, r2.nodes.get('tron|S1')!.omitted], [1, 1]);
+  // bounds: wallet cap
+  const r3 = await trace([seedsA[0]], { ...P, hops: 3, maxWallets: 2 }, mkDeps());
+  assert.ok(r3.stats.walletCap && r3.nodes.size === 3); // 1 seed + 2 onward
+  // bounds: time budget, honest partial result
+  let clock = 0;
+  const r4 = await trace(seedsA, { ...P, budgetSec: 10 }, mkDeps({ now: () => (clock += 6_000) }));
+  assert.ok(r4.stats.timedOut && r4.stats.notFollowed > 0 && r4.stats.walletsTraced < res.stats.walletsTraced);
+  // service-scale by a full first page (busyTransfers), documented parameter
+  const r5 = await trace([seedsA[0]], { ...P, hops: 2, busyTransfers: 3 }, mkDeps());
+  assert.equal(r5.nodes.get('tron|S1')!.stop, 'busy'); // S1 has >= 3 transfers: read but not followed
+  assert.equal(r5.nodes.size, 1);
+  // an unreadable wallet is reported, not swallowed
+  const r6 = await trace([seedsA[0]], P, mkDeps({ transfers: async () => { throw new Error('upstream 429'); } }));
+  assert.deepEqual([r6.stats.failed, r6.stats.walletsTraced, r6.nodes.get('tron|S1')!.error], [1, 0, 'upstream 429']);
+  // labelled exchange as the recipient itself: no fetch at all
+  calls.length = 0;
+  const rx = await trace([{ chain: 'tron', address: 'EX', after: 0 }], P, mkDeps());
+  assert.equal(calls.length, 0);
+  assert.ok(exchangeFindings(rx.nodes)[0].statement.includes('pays a wallet labelled Binance directly') && !exchangeFindings(rx.nodes)[0].statement.includes('0 USD'));
+  // consolidation: three traced wallets pay one
+  const conL: Transfer[] = [xt('a', 'S1', 'M1', 10, 1), xt('b', 'S1', 'M2', 10, 1), xt('c', 'S1', 'M3', 10, 1), xt('d', 'M1', 'HUB', 10, 2), xt('e', 'M2', 'HUB', 10, 2), xt('f', 'M3', 'HUB', 10, 2)];
+  const rc = await trace([{ chain: 'tron', address: 'S1', after: T0 }], { ...P, hops: 2 }, mkDeps({ transfers: async (_c, a) => conL.filter((t) => t.from === a || t.to === a) }));
+  const cons = consolidations(rc.edges, rc.nodes, 3);
+  assert.deepEqual([cons.length, cons[0].title, cons[0].statement.includes('HUB')], [1, '3 wallets consolidate into one', true]);
+  assert.equal(consolidations(rc.edges, rc.nodes, 4).length, 0);
+  // deposit-address inference: unlabelled D forwards everything to labelled HOT and was paid by 3 other senders -> endpoint HOT, path says "inferred"
+  const depL: Transfer[] = [xt('s', 'S1', 'D', 100, 1), xt('x1', 'U1', 'D', 5, 0), xt('x2', 'U2', 'D', 5, 0), xt('x3', 'U3', 'D', 5, 0), xt('sweep', 'D', 'HOT', 115, 2)];
+  labelDb.HOT = [lb('Kraken', 'exchange', 'official')];
+  const rd = await trace([{ chain: 'tron', address: 'S1', after: T0 }], P, mkDeps({ transfers: async (_c, a) => depL.filter((t) => t.from === a || t.to === a) }));
+  assert.equal(rd.nodes.get('tron|D')!.stop, 'deposit');
+  assert.equal(pathText(pathTo(rd.nodes, 'tron|HOT')), 'S1 → D (inferred Kraken deposit address) → HOT (Kraken)');
+  assert.ok(exchangeFindings(rd.nodes)[0].statement.includes('heuristic'));
+  assert.equal(DEFAULT_PARAMS.hops, 2); // documented defaults
   }
 
   // --- SSRF guard ---
