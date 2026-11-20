@@ -8,3 +8,4 @@ uploads/
 backups/
 
 *.log
+deploy.env
