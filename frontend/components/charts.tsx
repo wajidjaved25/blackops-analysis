@@ -36,7 +36,7 @@ export function RadialHeatmap({ transfers, title = 'Activity by hour and weekday
   return (
     <div className="stack sm">
       <div className="row spread">
-        <Segmented label="Metric" value={metric} onChange={setMetric} options={[{ id: 'count', label: 'Transfers' }, { id: 'volume', label: 'USDT volume' }]} />
+        <Segmented label="Metric" value={metric} onChange={setMetric} options={[{ id: 'count', label: 'Transfers' }, { id: 'volume', label: 'USD volume' }]} />
         <select className="select sm" style={{ width: 'auto' }} aria-label="Time zone" value={tz} onChange={(e) => setTz(e.target.value as Tz)}>
           <option value="UTC">UTC</option><option value="local">Local ({local})</option>
         </select>
@@ -54,7 +54,7 @@ export function RadialHeatmap({ transfers, title = 'Activity by hour and weekday
                 return (
                   <path key={hr} d={sector(CX, CY, r0, r1, a0, a1)} style={{ fill: `var(--heat${bucket(val(c))})` }} stroke={on ? 'var(--text)' : 'none'} strokeWidth={1.5} tabIndex={c.c ? 0 : undefined}
                     onMouseEnter={() => setHov({ d: day, h: hr })} onMouseLeave={() => setHov(null)} onFocus={() => setHov({ d: day, h: hr })} onBlur={() => setHov(null)}>
-                    <title>{`${DAYS[day]} ${String(hr).padStart(2, '0')}:00 ${tz === 'UTC' ? 'UTC' : local} — ${c.c} transfers, ${num(c.v)} USDT`}</title>
+                    <title>{`${DAYS[day]} ${String(hr).padStart(2, '0')}:00 ${tz === 'UTC' ? 'UTC' : local} — ${c.c} transfers, ${num(c.v)} USD`}</title>
                   </path>
                 );
               })}
@@ -70,7 +70,7 @@ export function RadialHeatmap({ transfers, title = 'Activity by hour and weekday
         <text x={CX} y={CY + 10} textAnchor="middle" fontSize="11" style={{ fill: 'var(--faint)' }}>of day</text>
       </svg>
       <div className="small muted" style={{ minHeight: 20, textAlign: 'center' }} aria-live="polite">
-        {hov && h ? <><b style={{ color: 'var(--text)' }}>{DAYS[hov.d]} {String(hov.h).padStart(2, '0')}:00</b> · {h.c} transfers · {num(h.v)} USDT</> : 'Hover a cell for details. Hour 0 starts at the top, clockwise; weekdays run Sun (outer) to Mon (inner).'}
+        {hov && h ? <><b style={{ color: 'var(--text)' }}>{DAYS[hov.d]} {String(hov.h).padStart(2, '0')}:00</b> · {h.c} transfers · {num(h.v)} USD</> : 'Hover a cell for details. Hour 0 starts at the top, clockwise; weekdays run Sun (outer) to Mon (inner).'}
       </div>
       <div className="row" style={{ justifyContent: 'center', gap: 6 }} aria-label="Colour scale">
         <span className="xs muted">0</span>
@@ -100,19 +100,19 @@ export function DailyBars({ transfers, address }: { transfers: Tr[]; address: st
   const y = (v: number) => T + (H - T - B) * (1 - v / max);
   return (
     <div className="stack sm">
-      <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`Daily USDT inflow and outflow, last ${days.length} active days`} style={{ width: '100%' }}>
+      <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`Daily USD-equivalent inflow and outflow, last ${days.length} active days`} style={{ width: '100%' }}>
         {[0, .5, 1].map((f) => (
           <g key={f}><line x1={L} x2={W} y1={y(max * f)} y2={y(max * f)} stroke="var(--border)" /><text x={L - 6} y={y(max * f) + 3} textAnchor="end" fontSize="9.5" style={{ fill: 'var(--muted)' }}>{compact(max * f)}</text></g>
         ))}
         {days.map(([d, v], i) => (
           <g key={d}>
-            <rect x={L + i * bw + bw * .1} width={bw * .4} y={y(v.i)} height={H - B - y(v.i)} rx={1.5} style={{ fill: 'var(--low)' }}><title>{`${d}: in ${num(v.i)} USDT`}</title></rect>
-            <rect x={L + i * bw + bw * .5} width={bw * .4} y={y(v.o)} height={H - B - y(v.o)} rx={1.5} style={{ fill: 'var(--high)' }}><title>{`${d}: out ${num(v.o)} USDT`}</title></rect>
+            <rect x={L + i * bw + bw * .1} width={bw * .4} y={y(v.i)} height={H - B - y(v.i)} rx={1.5} style={{ fill: 'var(--low)' }}><title>{`${d}: in ${num(v.i)} USD`}</title></rect>
+            <rect x={L + i * bw + bw * .5} width={bw * .4} y={y(v.o)} height={H - B - y(v.o)} rx={1.5} style={{ fill: 'var(--high)' }}><title>{`${d}: out ${num(v.o)} USD`}</title></rect>
             {(i === 0 || i === days.length - 1 || i === Math.floor(days.length / 2)) && <text x={L + i * bw + bw / 2} y={H - 8} textAnchor={i === 0 ? 'start' : i === days.length - 1 ? 'end' : 'middle'} fontSize="9.5" style={{ fill: 'var(--muted)' }}>{d}</text>}
           </g>
         ))}
       </svg>
-      <div className="legend"><span><i className="dot" style={{ background: 'var(--low)' }} />Inflow</span><span><i className="dot" style={{ background: 'var(--high)' }} />Outflow</span><span>USDT per day (last {days.length} active days)</span></div>
+      <div className="legend"><span><i className="dot" style={{ background: 'var(--low)' }} />Inflow</span><span><i className="dot" style={{ background: 'var(--high)' }} />Outflow</span><span>USD (USDT+USDC) per day (last {days.length} active days)</span></div>
     </div>
   );
 }

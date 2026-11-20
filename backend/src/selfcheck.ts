@@ -1,16 +1,17 @@
 // Run: npm run check — fails loudly if core logic breaks. No network calls.
 import assert from 'node:assert/strict';
-import { detectChain, flows, hexToTron, isTxHash, norm, Transfer, tronToHex20 } from './chains';
+import { assetByContract, ASSETS, CHAINS, CIRCLE, parseUnits, REGISTRY, selectAssets, TETHER } from './assets';
+import { detectChain, flows, FrozenMap, frozenBy, hexToTron, isTxHash, norm, parseFreezeLog, Transfer, tronToHex20 } from './chains';
 import { buildGraph, findPath } from './graph';
 import { level, scoreRisk } from './risk-score';
 import { clusterConfidence, depositEvidence } from './cluster';
 import { withVolumes } from './graph';
-import { planRead, splitBoundary, tailEnd, withSeq } from './index-rules';
-import { evaluateRules } from './monitor-rules';
+import { planRead, retryDelayMs, splitBoundary, tailEnd, withSeq } from './index-rules';
+import { evaluateRules, ruleParams } from './monitor-rules';
 import { ALL_PERMS, hasAny, missing, PERMISSIONS, SYSTEM_ROLES } from './permissions';
 import { graphAddresses, pickSources, timelineHops } from './timeline';
 import { base32, newRecoveryCodes, openSecret, recoveryHash, sealSecret, totp, unbase32, verifyTotp } from './totp';
-import { parseCsv, privateIp, toCsv } from './util';
+import { assetParam, parseAddr, parseCsv, privateIp, toCsv } from './util';
 
 async function main() {
   // --- address handling ---
@@ -35,17 +36,17 @@ async function main() {
   const C = '0xcccc000000000000000000000000000000000000';
   const m = me.toLowerCase();
   const f = flows(me, [
-    { hash: '1', from: B, to: m, amount: 100, timestamp: 1 },
-    { hash: '2', from: m, to: B, amount: 40, timestamp: 2 },
-    { hash: '3', from: m, to: C, amount: 500, timestamp: 3 },
-    { hash: '4', from: m, to: m, amount: 9, timestamp: 4 }, // self-transfer ignored
+    { asset: 'usdt' as const, hash: '1', from: B, to: m, amount: 100, timestamp: 1 },
+    { asset: 'usdt' as const, hash: '2', from: m, to: B, amount: 40, timestamp: 2 },
+    { asset: 'usdt' as const, hash: '3', from: m, to: C, amount: 500, timestamp: 3 },
+    { asset: 'usdt' as const, hash: '4', from: m, to: m, amount: 9, timestamp: 4 }, // self-transfer ignored
   ]);
   assert.equal(f.length, 2);
   assert.deepEqual(f[0], { address: C, in: 0, out: 500, inCount: 0, outCount: 1 });
   assert.deepEqual(f[1], { address: B, in: 100, out: 40, inCount: 1, outCount: 1 });
 
   // --- graph + path on a fake ledger: A->B->C->D, A->E, X->D ---
-  const t = (from: string, to: string, amount: number): Transfer => ({ hash: from + to, from, to, amount, timestamp: 0 });
+  const t = (from: string, to: string, amount: number): Transfer => ({ asset: 'usdt' as const, hash: from + to, from, to, amount, timestamp: 0 });
   const ledger = [t('A', 'B', 50), t('B', 'C', 40), t('C', 'D', 30), t('A', 'E', 10), t('X', 'D', 5)];
   let calls = 0;
   const getFlows = async (a: string) => {
@@ -103,13 +104,13 @@ async function main() {
   assert.equal(toCsv([['=cmd()', -5, 'ok']]), `"'=cmd()","-5","ok"\r\n`); // formula injection neutralised, numbers kept
 
   // --- link-chart transfers (?transfers=true) ---
-  const many = Array.from({ length: 60 }, (_, i) => ({ hash: `h${i}`, from: 'A', to: 'B', amount: 1, timestamp: i }));
+  const many = Array.from({ length: 60 }, (_, i) => ({ asset: 'usdt' as const, hash: `h${i}`, from: 'A', to: 'B', amount: 1, timestamp: i }));
   const plain = flows('A', many);
   assert.ok(!('outTransfers' in plain[0])); // default shape unchanged
-  const withT = flows('A', [...many, { hash: 'in', from: 'B', to: 'A', amount: 7, timestamp: 5 }], true);
+  const withT = flows('A', [...many, { asset: 'usdt' as const, hash: 'in', from: 'B', to: 'A', amount: 7, timestamp: 5 }], true);
   assert.equal(withT[0].outTransfers!.length, 50); // capped at 50 per edge
   assert.equal(withT[0].outTransfers![0].hash, 'h59'); // newest first
-  assert.deepEqual(withT[0].inTransfers, [{ hash: 'in', amount: 7, timestamp: 5 }]);
+  assert.deepEqual(withT[0].inTransfers, [{ asset: 'usdt' as const, hash: 'in', amount: 7, timestamp: 5 }]);
   const ledgerT = [...many, t('B', 'C', 5)];
   const gT = await buildGraph('A', 1, 8, async (a) => flows(a, ledgerT.filter((x) => x.from === a || x.to === a), true));
   assert.equal(gT.edges.find((e) => e.id === 'A>B')!.transfers!.length, 50);
@@ -163,8 +164,8 @@ async function main() {
   const ME = 'TMe';
   const hr = 3_600_000;
   const nowMs = 1_700_000_000_000;
-  const small = { hash: 's1', from: 'TOther', to: ME, amount: 10, timestamp: nowMs - 1000 };
-  const big = { hash: 'b1', from: ME, to: 'TOther', amount: 5000, timestamp: nowMs - 1000 };
+  const small = { asset: 'usdt' as const, hash: 's1', from: 'TOther', to: ME, amount: 10, timestamp: nowMs - 1000 };
+  const big = { asset: 'usdt' as const, hash: 'b1', from: ME, to: 'TOther', amount: 5000, timestamp: nowMs - 1000 };
   const noLabels = () => [];
   const rule = (type: string, params: object) => [{ id: 1, type, params }];
   const amt = rule('amount_over', { amount: 1000 });
@@ -177,8 +178,8 @@ async function main() {
   assert.equal(evaluateRules(flag, ME, [small], [small], lab, nowMs).length, 0); // unlabelled counterparty
   assert.equal(evaluateRules(flag, ME, [{ ...small, from: 'TEx' }], [], lab, nowMs).length, 0); // exchange weight 0 < 50
   const spike = rule('volume_spike', { factor: 5 });
-  const old = { hash: 'o1', from: 'TOther', to: ME, amount: 100, timestamp: nowMs - 10 * hr };
-  const burst = { hash: 'p1', from: 'TOther', to: ME, amount: 1000, timestamp: nowMs - 1000 };
+  const old = { asset: 'usdt' as const, hash: 'o1', from: 'TOther', to: ME, amount: 100, timestamp: nowMs - 10 * hr };
+  const burst = { asset: 'usdt' as const, hash: 'p1', from: 'TOther', to: ME, amount: 1000, timestamp: nowMs - 1000 };
   assert.equal(evaluateRules(spike, ME, [burst], [old, burst], noLabels, nowMs).length, 1);
   const calm = { ...burst, amount: 5 };
   assert.equal(evaluateRules(spike, ME, [calm], [old, calm], noLabels, nowMs).length, 0);
@@ -186,7 +187,7 @@ async function main() {
 
   // --- case timeline hops: S -> A -> B, plus an unrelated pair ---
   const tl = timelineHops(
-    [{ hash: '2', from: 'A', to: 'B', amount: 1, timestamp: 20 }, { hash: '1', from: 'S', to: 'A', amount: 1, timestamp: 10 }, { hash: '3', from: 'X', to: 'Y', amount: 1, timestamp: 30 }, { hash: '4', from: 'Z', to: 'S', amount: 1, timestamp: 5 }],
+    [{ asset: 'usdt' as const, hash: '2', from: 'A', to: 'B', amount: 1, timestamp: 20 }, { asset: 'usdt' as const, hash: '1', from: 'S', to: 'A', amount: 1, timestamp: 10 }, { asset: 'usdt' as const, hash: '3', from: 'X', to: 'Y', amount: 1, timestamp: 30 }, { asset: 'usdt' as const, hash: '4', from: 'Z', to: 'S', amount: 1, timestamp: 5 }],
     ['S'],
   );
   assert.deepEqual(tl.map((x) => [x.hash, x.hop]), [['4', 1], ['1', 1], ['2', 2], ['3', null]]); // oldest first; hop = distance from the source
@@ -196,7 +197,7 @@ async function main() {
 
   // --- deposit-address clustering heuristic ---
   const HOT = 'THot';
-  const ct = (from: string, to: string, amount: number): Transfer => ({ hash: from + to + amount, from, to, amount, timestamp: 0 });
+  const ct = (from: string, to: string, amount: number): Transfer => ({ asset: 'usdt' as const, hash: from + to + amount, from, to, amount, timestamp: 0 });
   const deposit = [ct('U1', 'TDep', 50), ct('U2', 'TDep', 30), ct('U3', 'TDep', 20), ct('TDep', HOT, 99), ct('TDep', 'TTip', 1)];
   const ev = depositEvidence('TDep', deposit, HOT)!;
   assert.deepEqual([ev.depositors, ev.outToHot, ev.totalOut], [3, 99, 100]);
@@ -207,7 +208,7 @@ async function main() {
   assert.equal(depositEvidence('TDep', [ct(HOT, 'TDep', 5), ct('U2', 'TDep', 5), ct('U3', 'TDep', 5), ct('TDep', HOT, 10)], HOT), null); // the hot wallet itself is not a depositor
 
   // --- transfer index (7A): seq dedupe, read-through decisions, incremental sync, block-range paging ---
-  const tr = (hash: string, amount: number, from = 'A', to = 'B') => ({ hash, from, to, amount, timestamp: 1 });
+  const tr = (hash: string, amount: number, from = 'A', to = 'B', asset = 'usdt') => ({ asset, hash, from, to, amount, timestamp: 1 });
   // two identical transfers in one tx get seq 0,1; a different amount or tx restarts at 0; re-running gives the same keys
   const seqd = withSeq([tr('h1', 5), tr('h1', 5), tr('h1', 6), tr('h2', 5), tr('h1', 5)]);
   assert.deepEqual(seqd.map((r) => r.seq), [0, 1, 0, 0, 2]);
@@ -215,13 +216,13 @@ async function main() {
   const carry = new Map<string, number>(); // same tx split over two pages keeps counting
   assert.deepEqual([...withSeq([tr('h', 1)], carry), ...withSeq([tr('h', 1)], carry)].map((r) => r.seq), [0, 1]);
   const tnow = 1_000_000;
-  const cov = (status: string, rowCount = 100, ageMs = 1000) => ({ status, rowCount, lastSyncAt: new Date(tnow - ageMs) });
+  const cov = (status: string, rowCount = 100, ageMs = 1000, assets = 'usdt,usdc') => ({ status, rowCount, lastSyncAt: new Date(tnow - ageMs), assets });
   assert.equal(planRead(null, 200, false, tnow, 300_000), 'api'); // not covered -> live API
   for (const st of ['pending', 'backfilling', 'error']) assert.equal(planRead(cov(st), 200, false, tnow, 300_000), 'api'); // partial coverage is never trusted
   assert.equal(planRead(cov('complete'), 200, false, tnow, 300_000), 'db'); // covered + fresh -> Postgres only
   assert.equal(planRead(cov('complete', 100, 400_000), 200, false, tnow, 300_000), 'sync-then-db'); // stale -> fetch only newer rows
   assert.equal(planRead(cov('complete'), 200, true, tnow, 300_000), 'sync-then-db'); // monitoring asks for fresh
-  assert.equal(planRead({ status: 'complete', rowCount: 1, lastSyncAt: null }, 200, false, tnow, 300_000), 'sync-then-db'); // never synced
+  assert.equal(planRead({ status: 'complete', rowCount: 1, lastSyncAt: null, assets: 'usdt' }, 200, false, tnow, 300_000), 'sync-then-db'); // never synced
   assert.equal(planRead(cov('capped', 50_000), 2000, false, tnow, 300_000), 'db'); // capped holds the newest N: enough for small reads
   assert.equal(planRead(cov('capped', 1000), 2000, false, tnow, 300_000), 'api'); // ...not for reads wanting more than it holds
   // Etherscan-style newest-first batches: a full batch drops its possibly-cut oldest block and restarts there
@@ -233,6 +234,95 @@ async function main() {
   assert.equal(tailEnd(0, 1_000_000, 60_000, 120_000), 59_999);
   assert.equal(tailEnd(900_000, 1_000_000, 60_000, 120_000), 880_000); // end < cursor -> caught up
   assert.ok(PERMISSIONS.some((p) => p.key === 'index.manage') && SYSTEM_ROLES.find((r) => r.name === 'Admin')!.permissions.includes('index.manage') && !SYSTEM_ROLES.find((r) => r.name === 'Analyst')!.permissions.includes('index.manage'));
+
+  // --- asset registry (7B): decimals were verified live (symbol()/decimals()) on 2026-11-20 ---
+  const regKey = REGISTRY.map((d) => `${d.chain}:${d.asset}:${d.symbol}:${d.decimals}`);
+  assert.deepEqual(regKey, ['tron:usdt:USDT:6', 'tron:usdc:USDC:6', 'eth:usdt:USDT:6', 'eth:usdc:USDC:6', 'bsc:usdt:USDT:18', 'bsc:usdc:USDC:18']);
+  assert.ok(REGISTRY.every((d) => (d.chain === 'tron' ? detectChain(d.contract) === 'tron' : d.contract === d.contract.toLowerCase() && detectChain(d.contract) === 'eth')));
+  assert.equal(assetByContract('eth', '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48')!.asset, 'usdc'); // checksum-case log address still resolves
+  assert.equal(assetByContract('bsc', '0x55d398326f99059fF775485246999027B3197955')!.decimals, 18);
+  assert.equal(assetByContract('tron', 'TEkxiTehnzSmSe2XqrBj4w32RUN966rdz8')!.asset, 'usdc');
+  assert.equal(assetByContract('eth', '0x55d398326f99059fF775485246999027B3197955'), undefined); // BSC contract is not an Ethereum asset
+  assert.deepEqual(selectAssets('tron', 'usdc').map((d) => d.asset), ['usdc']);
+  assert.deepEqual(selectAssets('bsc', 'all').map((d) => d.asset), [...ASSETS]);
+  // decimals parsing: BigInt, so 18-decimal and uint256-sized values neither lose the integer part nor throw
+  assert.equal(parseUnits('1234567', 6), 1.234567);
+  assert.equal(parseUnits('1000000000000000000', 18), 1);
+  assert.equal(parseUnits('9007199254740993000000', 18), 9007.199254740993); // raw > 2^53: Number(raw) would already be rounded
+  assert.ok(Math.abs(parseUnits('123456789123456789123456789', 18) - 123456789.12345679) < 1e-6);
+  assert.equal(parseUnits(5n * 10n ** 29n, 18), 5e11);
+  assert.ok(Number.isFinite(parseUnits(2n ** 255n, 6))); // garbage uint256 values some contracts emit
+  assert.equal(parseUnits('0', 18), 0);
+
+  // --- chain resolution of 0x addresses: default Ethereum, BSC only when asked, shapes must match ---
+  const evm = '0xAAAA000000000000000000000000000000000001';
+  assert.deepEqual(parseAddr(evm), { chain: 'eth', addr: evm.toLowerCase() });
+  assert.deepEqual(parseAddr(evm, 'eth'), { chain: 'eth', addr: evm.toLowerCase() });
+  assert.deepEqual(parseAddr(evm, 'bsc'), { chain: 'bsc', addr: evm.toLowerCase() });
+  assert.deepEqual(parseAddr('TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t', 'tron'), { chain: 'tron', addr: 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t' });
+  assert.deepEqual(parseAddr('TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t', ''), { chain: 'tron', addr: 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t' });
+  assert.throws(() => parseAddr(evm, 'tron'));
+  assert.throws(() => parseAddr('TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t', 'bsc'));
+  assert.throws(() => parseAddr(evm, 'solana'));
+  assert.ok(isTxHash('bsc', '0x' + 'a'.repeat(64)) && CHAINS.length === 3);
+  assert.equal(assetParam(undefined), 'all');
+  assert.equal(assetParam('usdc'), 'usdc');
+  assert.throws(() => assetParam('dai'));
+
+  // --- Circle (USDC) + Tether freeze events from crafted Etherscan logs ---
+  const pad = (a: string) => '0x' + '0'.repeat(24) + a.toLowerCase().slice(2);
+  const bad = '0xDeaDbeef00000000000000000000000000000001';
+  const circleAdd = { topics: ['0x' + CIRCLE.added, pad(bad)], data: '0x', blockNumber: '0x10', logIndex: '0x2' };
+  assert.deepEqual(parseFreezeLog(circleAdd, 'circle'), { address: bad.toLowerCase(), added: true, ts: 16, idx: 2 });
+  assert.deepEqual(parseFreezeLog({ ...circleAdd, topics: ['0x' + CIRCLE.removed, pad(bad)] }, 'circle'), { address: bad.toLowerCase(), added: false, ts: 16, idx: 2 });
+  const tetherAdd = { topics: ['0x' + TETHER.added], data: pad(bad), blockNumber: '0x20', logIndex: '0x0' }; // Tether: address in data, not indexed
+  assert.deepEqual(parseFreezeLog(tetherAdd, 'tether'), { address: bad.toLowerCase(), added: true, ts: 32, idx: 0 });
+  assert.equal(parseFreezeLog(circleAdd, 'tether'), null); // another issuer's topic is ignored
+  assert.equal(parseFreezeLog({ topics: ['0x' + '00'.repeat(32), pad(bad)], blockNumber: '0x1' }, 'circle'), null);
+  assert.equal(CIRCLE.isFrozen, '0xfe575a87'); // isBlacklisted(address), confirmed live against TronGrid's function_selector
+  assert.equal(TETHER.isFrozen, '0xe47d6060');
+
+  // --- frozen map -> issuer names (BSC pegged tokens: null = not applicable) ---
+  const fm = (usdt: boolean | null, usdc: boolean | null): FrozenMap => ({ usdt, usdc });
+  assert.deepEqual(frozenBy('bsc', fm(null, null)), []);
+  assert.deepEqual(frozenBy('tron', fm(false, true)), ['Circle']);
+  assert.deepEqual(frozenBy('eth', fm(true, true)), ['Tether', 'Circle']);
+  assert.match(scoreRisk({ own: [], frozen: true, frozenBy: ['Circle'], flows: [], labelsOf }).reasons[0], /Circle/);
+
+  // --- asset filtering, per-asset graph edges, combined USD volume ---
+  const mixed: Transfer[] = [
+    { asset: 'usdt', hash: 'u1', from: 'A', to: 'B', amount: 100, timestamp: 1 },
+    { asset: 'usdc', hash: 'c1', from: 'A', to: 'B', amount: 40, timestamp: 2 },
+    { asset: 'usdc', hash: 'c2', from: 'C', to: 'A', amount: 7, timestamp: 3 },
+  ];
+  const fAll = flows('A', mixed, false, true);
+  assert.deepEqual([fAll[0].address, fAll[0].out], ['B', 140]); // risk sees USDT + USDC as one USD volume
+  assert.deepEqual(fAll[0].parts!.map((p) => [p.asset, p.out]), [['usdt', 100], ['usdc', 40]]);
+  assert.ok(!('parts' in flows('A', mixed)[0])); // default shape unchanged
+  const gMix = await buildGraph('A', 1, 8, async (a) => flows(a, mixed.filter((x) => x.from === a || x.to === a), false, true));
+  assert.deepEqual(gMix.edges.map((e) => [e.id, e.asset, e.amount]).sort(), [['A>B', 'usdt', 100], ['A>B:usdc', 'usdc', 40], ['C>A:usdc', 'usdc', 7]]); // USDT keeps the old id
+  const onlyUsdc = mixed.filter((x) => x.asset === 'usdc'); // what the asset=usdc filter hands to the graph
+  const gUsdc = await buildGraph('A', 1, 8, async (a) => flows(a, onlyUsdc.filter((x) => x.from === a || x.to === a), false, true));
+  assert.deepEqual(gUsdc.edges.map((e) => e.asset), ['usdc', 'usdc']);
+  const pathMix = await findPath('A', 'B', 2, 5, async (a) => flows(a, mixed.filter((x) => x.from === a || x.to === a), false, true));
+  assert.deepEqual(pathMix.edges.map((e) => e.asset).sort(), ['usdc', 'usdt']); // both assets' edges between consecutive hops
+  const fxMix = (a: string) => (a === 'B' ? [{ name: 'Ring', category: 'scam' }] : []);
+  assert.match(scoreRisk({ own: [], frozen: false, flows: flows('A', mixed), labelsOf: fxMix }).reasons[0], /140 USD-equivalent.*USDT and USDC are both/);
+  // coverage only serves the assets it stores
+  assert.equal(planRead(cov('complete', 10, 1000, 'usdt'), 200, false, tnow, 300_000, ['usdt']), 'db'); // pre-7B wallet still serves USDT from Postgres
+  assert.equal(planRead(cov('complete', 10, 1000, 'usdt'), 200, false, tnow, 300_000, ['usdt', 'usdc']), 'api'); // ...but not USDC until its upgrade backfill finishes
+  assert.equal(planRead(cov('complete'), 200, false, tnow, 300_000, ['usdc']), 'db');
+  assert.deepEqual([1, 2, 3, 4, 5].map((n) => retryDelayMs(n) / 60_000), [1, 2, 4, 8, 16]); // bounded back-off for failed backfills
+  assert.deepEqual(withSeq([tr('h', 1, 'A', 'B', 'usdt'), tr('h', 1, 'A', 'B', 'usdc')]).map((r) => r.seq), [0, 0]); // same tx, different assets: separate rows
+  // monitoring rules per asset
+  const usdcBig = { asset: 'usdc' as const, hash: 'x1', from: 'TOther', to: ME, amount: 5000, timestamp: nowMs - 1000 };
+  assert.equal(evaluateRules(rule('amount_over', { amount: 1000, asset: 'usdt' }), ME, [usdcBig], [usdcBig], noLabels, nowMs).length, 0); // rule watches USDT only
+  const hitC = evaluateRules(rule('amount_over', { amount: 1000, asset: 'usdc' }), ME, [usdcBig], [usdcBig], noLabels, nowMs)[0];
+  assert.deepEqual([hitC.asset, hitC.dedupKey], ['usdc', 'x1:usdc']);
+  assert.match(hitC.detail, /5,000 USDC/);
+  assert.equal(evaluateRules(amt, ME, [usdcBig], [usdcBig], noLabels, nowMs).length, 1); // rules without an asset param (pre-7B) watch every asset
+  assert.deepEqual(ruleParams('amount_over', { amount: 5 }), { amount: 5, asset: 'all' });
+  assert.throws(() => ruleParams('amount_over', { amount: 5, asset: 'dai' }));
 
   // --- SSRF guard ---
   assert.ok(['127.0.0.1', '10.1.2.3', '172.16.0.1', '192.168.1.1', '169.254.169.254', '::1', 'fd00::1', '::ffff:10.0.0.1'].every(privateIp));

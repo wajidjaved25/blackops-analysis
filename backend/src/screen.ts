@@ -5,7 +5,7 @@ import { Chain } from './chains';
 import { audit, Ctx, Db } from './db';
 import { Jobs } from './jobs';
 import { RiskService } from './risk';
-import { extractAddresses, found, id, toCsv } from './util';
+import { assetParam, extractAddresses, found, id, toCsv } from './util';
 
 const MAX = 1000;
 
@@ -15,6 +15,7 @@ interface ScreenRow {
   score: number | null;
   level: string | null;
   frozen: boolean | null;
+  frozenBy: string; // issuers, e.g. "Tether; Circle"
   labels: string;
   reasons: string;
   error?: string;
@@ -30,22 +31,24 @@ export class ScreenWorker implements OnModuleInit {
   onModuleInit() {
     this.jobs.register('screen', async (job, progress) => {
       const items = (job.payload as any).items as { chain: Chain; addr: string }[];
+      const asset = assetParam((job.payload as any).asset); // jobs queued before 7B have none = all
       const rows: ScreenRow[] = [];
       for (const [i, it] of items.entries()) {
         try {
-          const a = await this.risk.assess(it.chain, it.addr, job.orgId, { deep: false });
+          const a = await this.risk.assess(it.chain, it.addr, job.orgId, { deep: false, asset });
           rows.push({
             chain: it.chain,
             address: it.addr,
             score: a.score,
             level: a.level,
             frozen: a.frozen,
+            frozenBy: a.frozenBy.join('; '),
             labels: a.labels.map((l) => `${l.name} (${l.category})`).join('; '),
             reasons: a.reasons.join(' | '),
           });
         } catch (e) {
           // One bad address must not fail the whole batch.
-          rows.push({ chain: it.chain, address: it.addr, score: null, level: null, frozen: null, labels: '', reasons: '', error: (e as Error).message });
+          rows.push({ chain: it.chain, address: it.addr, score: null, level: null, frozen: null, frozenBy: '', labels: '', reasons: '', error: (e as Error).message });
         }
         if (i % 5 === 4 || i === items.length - 1) await progress(i + 1);
       }
@@ -61,12 +64,12 @@ export class ScreenController {
     private jobs: Jobs,
   ) {}
 
-  /** Body: { addresses: string[] } or { csv: "…" } (any cell that is an address is used). Max 1000. */
+  /** Body: { addresses: string[] } or { csv: "…" } (any cell that is an address is used), optional `chain` ("eth" default | "bsc") for the 0x addresses and `asset` (usdt | usdc | all) the exposure is measured in. Max 1000. */
   @Perm('screen.run')
   @Post()
   async create(@CurrentCtx() ctx: Ctx, @Body() b: any) {
     const items = extractAddresses(b, MAX);
-    const job = await this.jobs.enqueue(ctx.orgId, 'screen', { items, name: typeof b.name === 'string' ? b.name.slice(0, 100) : '' }, items.length);
+    const job = await this.jobs.enqueue(ctx.orgId, 'screen', { items, asset: assetParam(b.asset), name: typeof b.name === 'string' ? b.name.slice(0, 100) : '' }, items.length);
     await audit(this.db, ctx, 'screen.create', `job:${job.id}`, { count: items.length });
     return { id: job.id, total: items.length };
   }
@@ -80,14 +83,14 @@ export class ScreenController {
       take: 50,
       select: { id: true, status: true, progress: true, total: true, createdAt: true, updatedAt: true, error: true, payload: true },
     });
-    return jobs.map(({ payload, ...j }) => ({ ...j, name: (payload as any).name ?? '' }));
+    return jobs.map(({ payload, ...j }) => ({ ...j, name: (payload as any).name ?? '', asset: (payload as any).asset ?? 'all' }));
   }
 
   @Perm('investigate.view')
   @Get(':id')
   async get(@CurrentCtx() ctx: Ctx, @Param('id') raw: string) {
     const j = found(await this.db.job.findFirst({ where: { id: id(raw), orgId: ctx.orgId, type: 'screen' } }), 'Screening job not found');
-    return { id: j.id, status: j.status, progress: j.progress, total: j.total, error: j.error, rows: (j.result as any)?.rows ?? [] };
+    return { id: j.id, status: j.status, progress: j.progress, total: j.total, error: j.error, asset: (j.payload as any)?.asset ?? 'all', rows: (j.result as any)?.rows ?? [] };
   }
 
   @Perm('export.data')
@@ -100,8 +103,8 @@ export class ScreenController {
     res.setHeader('Content-Disposition', `attachment; filename="screening-${j.id}.csv"`);
     res.send(
       toCsv([
-        ['address', 'chain', 'risk_score', 'risk_level', 'frozen_by_tether', 'labels', 'reasons', 'error'],
-        ...rows.map((r) => [r.address, r.chain, r.score, r.level, r.frozen, r.labels, r.reasons, r.error ?? '']),
+        ['address', 'chain', 'risk_score', 'risk_level', 'frozen', 'frozen_by', 'labels', 'reasons', 'error'],
+        ...rows.map((r) => [r.address, r.chain, r.score, r.level, r.frozen, r.frozenBy ?? '', r.labels, r.reasons, r.error ?? '']),
       ]),
     );
   }

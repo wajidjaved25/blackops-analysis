@@ -123,7 +123,7 @@ export class MonitorService implements OnModuleInit {
     for (const h of hits) {
       try {
         const a = await this.db.alert.create({
-          data: { orgId: it.watchlist.orgId, watchItemId: it.id, ruleId: h.ruleId, dedupKey: h.dedupKey, chain, address: it.address, counterparty: h.counterparty, amount: h.amount, txHash: h.txHash, detail: h.detail },
+          data: { orgId: it.watchlist.orgId, watchItemId: it.id, ruleId: h.ruleId, dedupKey: h.dedupKey, chain, address: it.address, counterparty: h.counterparty, amount: h.amount, asset: h.asset, txHash: h.txHash, detail: h.detail },
         });
         created++;
         await this.notifier.alertCreated(a);
@@ -257,12 +257,13 @@ export class MonitorController {
   // ----- alerts -----
   @Perm('monitor.view')
   @Get('alerts')
-  async alerts(@CurrentCtx() ctx: Ctx, @Query('status') status?: string, @Query('watchlistId') wl?: string, @Query('page') page?: string) {
+  async alerts(@CurrentCtx() ctx: Ctx, @Query('status') status?: string, @Query('watchlistId') wl?: string, @Query('page') page?: string, @Query('asset') asset?: string) {
     const p = int(page, 0, 0, 10000);
     const where: Prisma.AlertWhereInput = {
       orgId: ctx.orgId,
       ...(status ? { status: oneOf(status, 'status', ALERT_STATUSES) } : {}),
       ...(wl ? { watchItem: { watchlistId: id(wl) } } : {}),
+      ...(asset && asset !== 'all' ? { asset: oneOf(asset, 'asset', ['usdt', 'usdc'] as const) } : {}), // alerts of rules that span every asset (asset = all) show under All only
     };
     const [rows, total] = await Promise.all([
       this.db.alert.findMany({ where, orderBy: { id: 'desc' }, skip: p * 50, take: 50, include: { rule: { select: { type: true } }, watchItem: { select: { note: true, watchlist: { select: { id: true, name: true } } } } } }),
@@ -321,7 +322,7 @@ export class MonitorController {
   @Post('notify-targets/:id/test')
   async testTarget(@CurrentCtx() ctx: Ctx, @Param('id') raw: string) {
     const t = found(await this.db.notifyTarget.findFirst({ where: { id: id(raw), orgId: ctx.orgId } }), 'Target not found');
-    const sample = { id: 0, orgId: ctx.orgId, watchItemId: 0, ruleId: 0, dedupKey: 'test', chain: 'tron', address: 'TEST', counterparty: null, amount: null, txHash: null, detail: 'Test notification from USDT Trace', status: 'open', createdAt: new Date(), updatedAt: new Date() } as Alert;
+    const sample = { id: 0, orgId: ctx.orgId, watchItemId: 0, ruleId: 0, dedupKey: 'test', chain: 'tron', asset: 'usdt', address: 'TEST', counterparty: null, amount: null, txHash: null, detail: 'Test notification from USDT Trace', status: 'open', createdAt: new Date(), updatedAt: new Date() } as Alert;
     if (t.type === 'webhook') return { ok: await this.notifier.webhook(t.target, t.secret ?? '', { event: 'test', alert: sample }) };
     await this.notifier.email(t.target, sample);
     return { ok: true };

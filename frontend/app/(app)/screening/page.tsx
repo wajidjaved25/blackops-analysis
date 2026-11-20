@@ -2,6 +2,7 @@
 import { Download, ScanSearch, Upload } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useMemo, useRef, useState } from 'react';
+import { AssetChips, ChainChoice } from '@/components/Assets';
 import { RequirePerm } from '@/components/Guard';
 import { AddressLink, CategoryChip, RiskBadge } from '@/components/Risk';
 import { Table } from '@/components/Table';
@@ -9,12 +10,12 @@ import { useToast } from '@/components/Toast';
 import { Badge, Button, Card, EmptyState, ErrorState, Field, Notice, PageHeader, Segmented, SkeletonRows, Textarea, Input, Time } from '@/components/ui';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { detectChain } from '@/lib/format';
+import { AssetFilter, Chain, detectChain, isEvmAddr } from '@/lib/format';
 import { useApi } from '@/lib/hooks';
 
 interface Job { id: number; name: string; status: 'queued' | 'running' | 'done' | 'failed'; progress: number; total: number; createdAt: string; error?: string }
-interface Row { chain: string; address: string; score: number; level: string; frozen: boolean; labels: { name: string; category: string }[]; reasons: string[]; error?: string }
-interface Detail { id: number; status: string; progress: number; total: number; error?: string; rows: Row[] }
+interface Row { chain: string; address: string; score: number; level: string; frozen: boolean; frozenBy?: string; labels: { name: string; category: string }[]; reasons: string[]; error?: string }
+interface Detail { id: number; status: string; progress: number; total: number; error?: string; asset?: AssetFilter; rows: Row[] }
 
 const tone = (s: string) => (s === 'done' ? 'good' : s === 'failed' ? 'severe' : 'info');
 
@@ -31,6 +32,8 @@ function Screening() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [lvl, setLvl] = useState('all');
+  const [asset, setAsset] = useState<AssetFilter>('all');
+  const [evm, setEvm] = useState<'eth' | 'bsc'>('eth'); // applies to every 0x address in the batch
   const jobs = useApi<Job[]>('/screen', (d) => (d.some((j) => j.status === 'queued' || j.status === 'running') ? 3000 : false));
   const detail = useApi<Detail>(job ? `/screen/${job}` : null, (d) => (d.status === 'queued' || d.status === 'running' ? 2500 : false));
 
@@ -47,7 +50,7 @@ function Screening() {
     if (parsed.ok.length > 1000) return setErr('A job can hold at most 1,000 addresses.');
     setBusy(true); setErr('');
     try {
-      const r = await api<{ id: number; total: number }>('/screen', { body: { name: name.trim() || undefined, addresses: parsed.ok } });
+      const r = await api<{ id: number; total: number }>('/screen', { body: { name: name.trim() || undefined, addresses: parsed.ok, asset, chain: evm === 'bsc' ? 'bsc' : undefined } });
       toast.success(`Screening started for ${r.total} addresses`);
       setText(''); setCsv(''); setName(''); jobs.reload(); router.push(`/screening?job=${r.id}`);
     } catch (x) { setErr((x as Error).message); } finally { setBusy(false); }
@@ -61,7 +64,7 @@ function Screening() {
         <Card title="New screening job">
           <form className="stack" onSubmit={submit}>
             <Field label="Job name (optional)"><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Customer batch 14" /></Field>
-            <Field label="Addresses" hint="One per line, or comma separated. Tron and Ethereum can be mixed.">
+            <Field label="Addresses" hint="One per line, or comma separated. Tron and 0x addresses can be mixed; pick the chain below for the 0x ones.">
               <Textarea className="mono" rows={6} value={text} onChange={(e) => setText(e.target.value)} placeholder={'TU4vEruvZwLLkSfV9bNw12EJTPvNr7Pvaa\n0x…'} disabled={!canRun} />
             </Field>
             <div className="row">
@@ -70,6 +73,11 @@ function Screening() {
               {csv && <Badge tone="info">CSV loaded <button className="copy" aria-label="Clear CSV" onClick={() => setCsv('')}>✕</button></Badge>}
               <span className="muted small end">{parsed.ok.length} valid{parsed.bad ? <span className="bad"> · {parsed.bad} invalid ignored</span> : null}</span>
             </div>
+            <div className="row" style={{ gap: 14 }}>
+              <AssetChips label="Exposure measured in" value={asset} onChange={setAsset} />
+              <ChainChoice addr={parsed.ok.find(isEvmAddr) ?? ''} value={evm as Chain} onChange={setEvm} />
+            </div>
+            <span className="xs muted">USDT and USDC are both ≈ 1 USD, so with All their volumes are added.</span>
             {err && <Notice tone="error">{err}</Notice>}
             {!canRun && <Notice tone="warn">Your role cannot start screening jobs (requires screen.run). You can still view results.</Notice>}
             <Button variant="primary" type="submit" busy={busy} disabled={!canRun || !parsed.ok.length}><ScanSearch size={15} />Screen {parsed.ok.length || ''} address{parsed.ok.length === 1 ? '' : 'es'}</Button>
@@ -92,6 +100,7 @@ function Screening() {
       {job && (
         <Card title={`Results · job #${job}`} flush actions={
           <div className="row">
+            {detail.data && <Badge tone="outline">Asset: {(detail.data.asset ?? 'all').toUpperCase()}</Badge>}
             {detail.data && <Badge tone={tone(detail.data.status)}>{detail.data.status === 'running' ? `${detail.data.progress}/${detail.data.total}` : detail.data.status}</Badge>}
             <Segmented label="Risk filter" value={lvl} onChange={setLvl} options={[{ id: 'all', label: 'All' }, { id: 'severe', label: 'Severe' }, { id: 'high', label: 'High' }, { id: 'medium', label: 'Medium' }, { id: 'low', label: 'Low' }]} />
             {can('export.data') ? <a className="btn sm" href={`/api/screen/${job}/csv`} download><Download size={14} />CSV</a> : <Button sm disabled title="Requires export.data"><Download size={14} />CSV</Button>}
@@ -103,10 +112,10 @@ function Screening() {
               <Table caption="Screening results" rows={rows} rowKey={(r) => r.address} pageSize={25} initialSort={{ key: 's', dir: 'desc' }}
                 empty={<EmptyState title="No results to show">{detail.data?.rows?.length ? 'No rows match this filter.' : 'Results will appear here as addresses are checked.'}</EmptyState>}
                 cols={[
-                  { key: 'a', header: 'Address', cell: (r) => <AddressLink address={r.address} /> },
+                  { key: 'a', header: 'Address', cell: (r) => <AddressLink address={r.address} chain={r.chain} /> },
                   { key: 'c', header: 'Chain', cell: (r) => <span className="muted">{r.chain}</span> },
                   { key: 's', header: 'Score', num: true, sort: (r) => r.score, cell: (r) => r.error ? '—' : r.score },
-                  { key: 'l', header: 'Risk', sort: (r) => r.score, cell: (r) => (r.error ? <Badge tone="outline">Error</Badge> : <span className="row nw"><RiskBadge level={r.level} />{r.frozen && <Badge tone="severe">Frozen</Badge>}</span>) },
+                  { key: 'l', header: 'Risk', sort: (r) => r.score, cell: (r) => (r.error ? <Badge tone="outline">Error</Badge> : <span className="row nw"><RiskBadge level={r.level} />{r.frozen && <Badge tone="severe">Frozen{r.frozenBy ? ` · ${r.frozenBy}` : ''}</Badge>}</span>) },
                   { key: 'lb', header: 'Labels', wrap: true, cell: (r) => <span className="row">{r.labels?.map((l, i) => <CategoryChip key={i} category={l.category} name={l.name} />)}</span> },
                   { key: 'r', header: 'Reasons', wrap: true, cell: (r) => <span className="small muted">{r.error ?? r.reasons?.slice(0, 2).join('; ')}</span> },
                 ]} />

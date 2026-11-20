@@ -1,6 +1,6 @@
 'use client';
 import Link from 'next/link';
-import { catColor, Level, short } from '@/lib/format';
+import { addrHref, catColor, Level, short } from '@/lib/format';
 import { Badge, CopyButton } from './ui';
 
 export const LEVEL_COLOR: Record<string, string> = { severe: 'var(--severe)', high: 'var(--high)', medium: 'var(--medium)', low: 'var(--low)' };
@@ -30,11 +30,11 @@ export function CategoryChip({ category, name }: { category?: string | null; nam
   return <span className="chip" style={{ ['--c' as string]: catColor(category) }} title={category ?? undefined}>{name ?? category}{name && category && <span style={{ opacity: .7, fontWeight: 500 }}>· {category}</span>}</span>;
 }
 
-export function AddressLink({ address, label, full, href, noCopy }: { address: string; label?: { name: string; category: string } | null; full?: boolean; href?: string; noCopy?: boolean }) {
+export function AddressLink({ address, label, full, href, noCopy, chain }: { address: string; label?: { name: string; category: string } | null; full?: boolean; href?: string; noCopy?: boolean; chain?: string }) {
   return (
     <span className="row" style={{ gap: 6 }}>
       <span className="addr">
-        <Link href={href ?? `/address/${address}`} title={address}>{full ? address : short(address)}</Link>
+        <Link href={href ?? addrHref(address, chain)} title={address}>{full ? address : short(address)}</Link>
         {!noCopy && <CopyButton value={address} label="Copy address" />}
       </span>
       {label && <CategoryChip category={label.category} name={label.name} />}

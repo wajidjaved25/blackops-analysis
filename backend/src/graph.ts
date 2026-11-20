@@ -1,4 +1,4 @@
-import { Flow, TransferRef } from './chains';
+import { Asset, Flow, TransferRef } from './chains';
 
 /** Counterparty flows for one address. Injected so graph logic is testable without the network. */
 export type GetFlows = (addr: string) => Promise<Flow[]>;
@@ -17,6 +17,7 @@ export interface GraphEdge {
   target: string;
   amount: number;
   count: number;
+  asset: Asset; // one edge per (direction, asset); a USDT edge keeps the plain `source>target` id, other assets append `:asset`
   transfers?: TransferRef[]; // only with ?transfers=true
 }
 export interface Graph {
@@ -26,17 +27,26 @@ export interface Graph {
 
 class EdgeSet {
   readonly map = new Map<string, GraphEdge>();
-  add(source: string, target: string, amount: number, count: number, transfers?: TransferRef[]) {
-    const id = `${source}>${target}`;
+  add(source: string, target: string, f: Flow, incoming: boolean) {
+    const amount = incoming ? f.in : f.out;
+    const asset = f.asset ?? 'usdt';
+    if (amount <= 0) return;
+    const id = `${source}>${target}${asset === 'usdt' ? '' : ':' + asset}`;
+    const count = incoming ? f.inCount : f.outCount;
+    const transfers = incoming ? f.inTransfers : f.outTransfers;
     const e = this.map.get(id);
     // Same transfers can be seen from both ends with different fetch windows: keep the larger view.
-    if (!e) this.map.set(id, { id, source, target, amount, count, ...(transfers ? { transfers } : {}) });
+    if (!e) this.map.set(id, { id, source, target, amount, count, asset, ...(transfers ? { transfers } : {}) });
     else if (amount > e.amount) Object.assign(e, { amount, count, ...(transfers ? { transfers } : {}) });
   }
-  get(source: string, target: string) {
-    return this.map.get(`${source}>${target}`);
+  /** Every asset's edge between two wallets. */
+  between(source: string, target: string) {
+    return [...this.map.values()].filter((e) => e.source === source && e.target === target);
   }
 }
+
+/** One counterparty becomes one edge per asset when the flow carries a per-asset split, else a single (USDT) edge. */
+const parts = (f: Flow) => f.parts ?? [f];
 
 /** BFS out from root: each expanded node contributes its top `fanout` counterparties by volume. */
 export async function buildGraph(root: string, depth: number, fanout: number, getFlows: GetFlows): Promise<Graph> {
@@ -58,8 +68,10 @@ export async function buildGraph(root: string, depth: number, fanout: number, ge
           nodes.set(f.address, { id: f.address, expanded: false });
           next.push(f.address);
         }
-        if (f.in > 0) edges.add(f.address, a, f.in, f.inCount, f.inTransfers);
-        if (f.out > 0) edges.add(a, f.address, f.out, f.outCount, f.outTransfers);
+        for (const p of parts(f)) {
+          edges.add(f.address, a, p, true);
+          edges.add(a, f.address, p, false);
+        }
       }
     }
     frontier = next;
@@ -98,7 +110,7 @@ export async function findPath(
     const path: string[] = [];
     for (let x: string | null | undefined = meet; x; x = fwd.get(x)) path.unshift(x);
     for (let x: string | null | undefined = bwd.get(meet); x; x = bwd.get(x)) path.push(x);
-    const pathEdges = path.slice(1).map((t, i) => edges.get(path[i], t)!);
+    const pathEdges = path.slice(1).flatMap((t, i) => edges.between(path[i], t));
     return { found: true, path, nodes: path.map((id) => ({ id, expanded: false })), edges: pathEdges, expansions: used, limitReached: false };
   };
 
@@ -115,8 +127,10 @@ export async function findPath(
         .sort((x, y) => (forward ? y.out - x.out : y.in - x.in))
         .slice(0, fanout);
       for (const f of fl) {
-        if (forward) edges.add(a, f.address, f.out, f.outCount, f.outTransfers);
-        else edges.add(f.address, a, f.in, f.inCount, f.inTransfers);
+        for (const p of parts(f)) {
+          if (forward) edges.add(a, f.address, p, false);
+          else edges.add(f.address, a, p, true);
+        }
         if (mine.has(f.address)) continue;
         mine.set(f.address, a);
         if (other.has(f.address)) return build(f.address);

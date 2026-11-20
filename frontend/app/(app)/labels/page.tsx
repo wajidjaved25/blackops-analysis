@@ -14,7 +14,7 @@ import { num } from '@/lib/format';
 import { useApi, useDebounced } from '@/lib/hooks';
 
 interface Label { id: number; orgId: number; chain: string; address: string; name: string; category: string; source: string; confidence?: number; createdAt: string }
-interface St { counts: Record<string, number>; ofacLastSync?: string; tetherLastSync?: string; etherscanKey?: boolean; categories: string[] }
+interface St { counts: Record<string, number>; ofacLastSync?: string; tetherLastSync?: string; circleLastSync?: string; etherscanKey?: boolean; categories: string[] }
 interface Dry { total: number; valid: number; errors: { line: number; address: string; error: string }[]; preview?: unknown[] }
 
 export default function Labels() {
@@ -33,15 +33,15 @@ export default function Labels() {
   const [sync, setSync] = useState('');
   const manage = can('labels.manage'), canSync = can('labels.sync');
 
-  async function runSync(source: 'ofac' | 'tether') {
+  async function runSync(source: 'ofac' | 'tether' | 'circle') {
     setSync(source);
     try { await api('/labels/sync', { body: { source } }); toast.success(`${source.toUpperCase()} sync finished`); st.reload(); list.reload(); }
     catch (e) { toast.error((e as Error).message); } finally { setSync(''); }
   }
-  const SyncCard = ({ s, title, last }: { s: 'ofac' | 'tether'; title: string; last?: string }) => (
+  const SyncCard = ({ s, title, last }: { s: 'ofac' | 'tether' | 'circle'; title: string; last?: string }) => (
     <Card><div className="row nw"><div className="grow"><div className="muted small">{title}</div><div style={{ fontSize: 20, fontWeight: 650 }}>{st.data ? num(st.data.counts[s] ?? 0) : '…'} <span className="muted small" style={{ fontWeight: 400 }}>labels</span></div><div className="xs muted">Last sync: {last ? <Time t={last} /> : 'never'}</div></div>
       <Button busy={sync === s} disabled={!canSync || !!sync} title={canSync ? '' : 'Requires labels.sync'} onClick={() => runSync(s)}><RefreshCw size={14} />Sync</Button></div>
-      {s === 'tether' && sync === 'tether' && <p className="xs muted" style={{ marginTop: 8 }}>A full Tether sync can take several minutes. You can leave this page open.</p>}
+      {(s === 'tether' || s === 'circle') && sync === s && <p className="xs muted" style={{ marginTop: 8 }}>A full {s === 'circle' ? 'Circle' : 'Tether'} sync can take several minutes. You can leave this page open.</p>}
     </Card>
   );
   return (
@@ -55,13 +55,14 @@ export default function Labels() {
           </>} />
         <div className="grid g3">
           <SyncCard s="ofac" title="OFAC sanctions list" last={st.data?.ofacLastSync} />
-          <SyncCard s="tether" title="Tether frozen wallets" last={st.data?.tetherLastSync} />
+          <SyncCard s="tether" title="Tether frozen wallets (USDT)" last={st.data?.tetherLastSync} />
+          <SyncCard s="circle" title="Circle blacklisted wallets (USDC)" last={st.data?.circleLastSync} />
           <Stat label="Manual · import · cluster" value={st.data ? `${num(st.data.counts.manual ?? 0)} · ${num(st.data.counts.import ?? 0)} · ${num(st.data.counts.cluster ?? 0)}` : '…'} sub={st.data && !st.data.etherscanKey ? 'Etherscan key not set: ERC20 data limited' : undefined} />
         </div>
         <Card flush title={<span className="row">
           <span style={{ position: 'relative' }}><Search size={14} style={{ position: 'absolute', left: 10, top: 8, color: 'var(--faint)' }} aria-hidden /><Input sm style={{ paddingLeft: 30, width: 240 }} placeholder="Search name or address" aria-label="Search labels" value={q} onChange={(e) => { setQ(e.target.value); setPage(0); }} /></span>
           <Select sm style={{ width: 150 }} aria-label="Category" value={cat} onChange={(e) => { setCat(e.target.value); setPage(0); }}><option value="">All categories</option>{(st.data?.categories ?? []).map((c) => <option key={c}>{c}</option>)}</Select>
-          <Select sm style={{ width: 130 }} aria-label="Source" value={src} onChange={(e) => { setSrc(e.target.value); setPage(0); }}><option value="">All sources</option>{['ofac', 'tether', 'manual', 'import', 'cluster'].map((c) => <option key={c}>{c}</option>)}</Select>
+          <Select sm style={{ width: 130 }} aria-label="Source" value={src} onChange={(e) => { setSrc(e.target.value); setPage(0); }}><option value="">All sources</option>{['ofac', 'tether', 'circle', 'manual', 'import', 'cluster'].map((c) => <option key={c}>{c}</option>)}</Select>
         </span>}>
           {list.loading ? <SkeletonRows /> : list.error ? <ErrorState error={list.error} status={list.status} onRetry={list.reload} /> : (
             <Table caption="Labels" rows={list.data?.rows ?? []} rowKey={(l) => l.id} pageSize={100} server={{ page, total: list.data?.total ?? 0, pageSize: list.data?.pageSize ?? 100, onPage: setPage }}

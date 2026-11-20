@@ -1,8 +1,9 @@
 import { Body, ConflictException, Controller, Delete, Get, Injectable, Logger, OnModuleInit, Param, Post, Query } from '@nestjs/common';
 import { CurrentCtx, Perm } from './auth';
+import { AssetFilter, assetDef, assetsCsv, assetsOf, CHAINS, parseUnits, selectAssets } from './assets';
 import { apiPages, apiTransfers, Chain, fetchJson, hexToTron, norm, Reason, setReadThrough, Transfer, tronGap, tronHeaders, upstream } from './chains';
 import { audit, Ctx, Db } from './db';
-import { planRead, Row, tailEnd, withSeq } from './index-rules';
+import { MAX_BACKFILL_RETRIES, planRead, retryDelayMs, Row, tailEnd, withSeq } from './index-rules';
 import { Jobs } from './jobs';
 import { found, int, parseAddr, str } from './util';
 
@@ -14,8 +15,9 @@ const TRON_WINDOW_MS = 60_000;
 const TRON_CONFIRM_LAG_MS = 120_000; // TronGrid only_confirmed lags ~1 min; stay clear of it or late-confirmed rows would be skipped
 const ETH_CONFIRMATIONS = 12;
 const ETH_BATCH_BLOCKS = 100;
-const TRON_USDT = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t';
-const ETH_USDT = '0xdac17f958d2ee523a2206206994597c13d831ec7';
+// The full-chain tailer follows USDT only (Tron, Ethereum); USDC and BSC enter the index through per-wallet backfills.
+const TRON_USDT = assetDef('tron', 'usdt').contract;
+const ETH_USDT = assetDef('eth', 'usdt').contract;
 const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 
 @Injectable()
@@ -31,9 +33,11 @@ export class TransferIndex implements OnModuleInit {
   ) {}
 
   async onModuleInit() {
-    setReadThrough((c, a, max, fresh, reason) => this.read(c, a, max, fresh, reason));
+    setReadThrough((c, a, max, fresh, reason, assets) => this.read(c, a, max, fresh, reason, assets));
     if (process.env.DISABLE_WORKERS === 'true') return;
     await this.db.indexedAddress.updateMany({ where: { status: 'backfilling' }, data: { status: 'pending' } }); // crash recovery
+    // A wallet indexed before an asset joined the registry fetches only the missing asset. Capped wallets are left alone (their reads for the new asset stay live).
+    for (const c of CHAINS) await this.db.indexedAddress.updateMany({ where: { chain: c, status: 'complete', NOT: { assets: assetsCsv(c) } }, data: { status: 'pending' } });
     this.jobs.every('index-backfill', 3000, async () => this.drain(), 8000);
     const tails = TAIL_CHAINS();
     if (tails.includes('tron')) this.jobs.every('index-tail-tron', 5000, () => this.tailTron(), 10_000);
@@ -45,7 +49,7 @@ export class TransferIndex implements OnModuleInit {
     let inserted = 0;
     const data = withSeq(rows, seen).map((r) => ({
       chain,
-      asset: 'usdt',
+      asset: r.asset,
       hash: r.hash,
       seq: r.seq,
       from: norm(r.from),
@@ -59,14 +63,14 @@ export class TransferIndex implements OnModuleInit {
   }
 
   /** Newest `max` transfers of a wallet. Two index scans merged: far cheaper than OR + sort on a big table. */
-  private async fromDb(chain: Chain, addr: string, max: number): Promise<Transfer[]> {
-    const rows = await this.db.$queryRaw<{ hash: string; from: string; to: string; amount: number; ts: number; block: number | null }[]>`
-      SELECT hash, "from", "to", amount::float8 AS amount, ts::float8 AS ts, block::float8 AS block FROM (
-        (SELECT * FROM "Transfer" WHERE chain = ${chain} AND "from" = ${addr} ORDER BY ts DESC LIMIT ${max})
+  private async fromDb(chain: Chain, addr: string, max: number, assets: string[]): Promise<Transfer[]> {
+    const rows = await this.db.$queryRaw<{ asset: string; hash: string; from: string; to: string; amount: number; ts: number; block: number | null }[]>`
+      SELECT asset, hash, "from", "to", amount::float8 AS amount, ts::float8 AS ts, block::float8 AS block FROM (
+        (SELECT * FROM "Transfer" WHERE chain = ${chain} AND "from" = ${addr} AND asset = ANY(${assets}) ORDER BY ts DESC LIMIT ${max})
         UNION
-        (SELECT * FROM "Transfer" WHERE chain = ${chain} AND "to" = ${addr} ORDER BY ts DESC LIMIT ${max})
+        (SELECT * FROM "Transfer" WHERE chain = ${chain} AND "to" = ${addr} AND asset = ANY(${assets}) ORDER BY ts DESC LIMIT ${max})
       ) t ORDER BY ts DESC, hash, seq LIMIT ${max}`;
-    return rows.map((r) => ({ hash: r.hash, from: r.from, to: r.to, amount: r.amount, timestamp: r.ts, ...(r.block === null ? {} : { block: r.block }) }));
+    return rows.map((r) => ({ asset: r.asset as Transfer['asset'], hash: r.hash, from: r.from, to: r.to, amount: r.amount, timestamp: r.ts, ...(r.block === null ? {} : { block: r.block }) }));
   }
 
   private async measure(chain: Chain, addr: string) {
@@ -91,31 +95,32 @@ export class TransferIndex implements OnModuleInit {
   }
 
   /** True lifetime totals from SQL (self-transfers excluded, like the counterparty view). */
-  async lifetime(chain: Chain, addr: string) {
+  async lifetime(chain: Chain, addr: string, assets: string[]) {
     const [r] = await this.db.$queryRaw<{ inn: number; out: number; in_count: number; out_count: number; cps: number; first: number | null; last: number | null }[]>`
       SELECT coalesce(sum(amount) FILTER (WHERE dir = 'in'), 0)::float8 AS inn, coalesce(sum(amount) FILTER (WHERE dir = 'out'), 0)::float8 AS out,
              count(*) FILTER (WHERE dir = 'in')::int AS in_count, count(*) FILTER (WHERE dir = 'out')::int AS out_count,
              count(DISTINCT other)::int AS cps, min(ts)::float8 AS first, max(ts)::float8 AS last
       FROM (
-        SELECT 'out' AS dir, "to" AS other, amount, ts FROM "Transfer" WHERE chain = ${chain} AND "from" = ${addr} AND "to" <> ${addr}
-        UNION ALL SELECT 'in', "from", amount, ts FROM "Transfer" WHERE chain = ${chain} AND "to" = ${addr} AND "from" <> ${addr}
+        SELECT 'out' AS dir, "to" AS other, amount, ts FROM "Transfer" WHERE chain = ${chain} AND "from" = ${addr} AND "to" <> ${addr} AND asset = ANY(${assets})
+        UNION ALL SELECT 'in', "from", amount, ts FROM "Transfer" WHERE chain = ${chain} AND "to" = ${addr} AND "from" <> ${addr} AND asset = ANY(${assets})
       ) t`;
     return { in: r.inn, out: r.out, inCount: r.in_count, outCount: r.out_count, counterparties: r.cps, firstSeen: r.first, lastSeen: r.last };
   }
 
   // ---------- read-through (7.3) ----------
-  async read(chain: Chain, addr: string, max: number, fresh: boolean, reason: Reason): Promise<Transfer[]> {
+  async read(chain: Chain, addr: string, max: number, fresh: boolean, reason: Reason, filter: AssetFilter = 'all'): Promise<Transfer[]> {
     addr = norm(addr);
     const cov = await this.coverage(chain, addr);
-    let plan = planRead(cov, max, fresh, Date.now(), FRESH_MS());
-    if (plan === 'sync-then-db' && TAIL_CHAINS().includes(chain)) {
-      // Tailer is live and has run continuously since this wallet was last synced: Postgres already has everything newer.
+    const wanted = selectAssets(chain, filter).map((d) => d.asset);
+    let plan = planRead(cov, max, fresh, Date.now(), FRESH_MS(), wanted);
+    if (plan === 'sync-then-db' && TAIL_CHAINS().includes(chain) && wanted.every((a) => a === 'usdt')) {
+      // Tailer is live and has run continuously since this wallet was last synced: Postgres already has everything newer (it follows USDT only).
       const c = await this.db.indexCursor.findUnique({ where: { chain } });
       if (c && Date.now() - Number(c.cursorTs) < TAIL_OK_LAG_MS && cov!.lastSyncAt && cov!.lastSyncAt.getTime() >= Number(c.since)) plan = 'db';
     }
     if (plan === 'api') {
       this.reads.api++;
-      const rows = await apiTransfers(chain, addr, max, fresh);
+      const rows = await apiTransfers(chain, addr, max, fresh, filter);
       try {
         await this.store(chain, rows);
         // graph neighbours are written through but not queued: one depth-2 graph would otherwise queue ~70 backfills
@@ -135,43 +140,46 @@ export class TransferIndex implements OnModuleInit {
       }
     }
     this.reads.db++;
-    return this.fromDb(chain, addr, max);
+    return this.fromDb(chain, addr, max, wanted);
   }
 
   /** Fetches only rows newer than the stored newest (inclusive, so no tx is ever split); the unique key drops the overlap. */
-  syncOnce(cov: { chain: string; address: string; newestTs: bigint | null }): Promise<void> {
+  syncOnce(cov: { chain: string; address: string; newestTs: bigint | null; assets: string }): Promise<void> {
     const key = `${cov.chain}:${cov.address}`;
     const p = this.syncing.get(key) ?? this.sync(cov).finally(() => this.syncing.delete(key));
     this.syncing.set(key, p);
     return p;
   }
 
-  private async sync(cov: { chain: string; address: string; newestTs: bigint | null }) {
+  private async sync(cov: { chain: string; address: string; newestTs: bigint | null; assets: string }) {
     const chain = cov.chain as Chain;
     const startedAt = new Date();
     const seen = new Map<string, number>();
-    const minBlock = chain === 'eth' ? await this.maxBlock(chain, cov.address) : null;
-    for await (const page of apiPages(chain, cov.address, { fresh: true, minTs: cov.newestTs ? Number(cov.newestTs) : undefined, minBlock: minBlock ?? undefined })) {
+    const minBlock = chain !== 'tron' ? await this.maxBlock(chain, cov.address) : null;
+    const assets = assetsOf(chain).filter((d) => cov.assets.split(',').includes(d.asset));
+    for await (const page of apiPages(chain, cov.address, { fresh: true, minTs: cov.newestTs ? Number(cov.newestTs) : undefined, minBlock: minBlock ?? undefined, assets })) {
       await this.store(chain, page, seen);
     }
     await this.finish(chain, cov.address, startedAt);
   }
 
   /** Re-measures coverage from SQL; a complete wallet that outgrew the limit becomes capped. */
-  private async finish(chain: Chain, address: string, at: Date, status?: string) {
+  private async finish(chain: Chain, address: string, at: Date, status?: string, assets?: string) {
     const m = await this.measure(chain, address);
     const cur = await this.coverage(chain, address);
     const next = status ?? (cur?.status === 'complete' && m.count > MAX_PER_ADDRESS() ? 'capped' : cur?.status);
     await this.db.indexedAddress.update({
       where: { chain_address: { chain, address } },
-      data: { status: next, rowCount: m.count, oldestTs: m.oldest === null ? null : BigInt(m.oldest), newestTs: m.newest === null ? null : BigInt(m.newest), lastSyncAt: at, error: null },
+      data: { status: next, rowCount: m.count, oldestTs: m.oldest === null ? null : BigInt(m.oldest), newestTs: m.newest === null ? null : BigInt(m.newest), lastSyncAt: at, error: null, ...(assets ? { assets, retries: 0, retryAt: null } : {}) },
     });
   }
 
   // ---------- backfill (7.2) ----------
   /** Up to 3 concurrent backfills (the host pool still limits real HTTP), so huge wallets cannot starve small ones; wallets someone asked for (manual/watch/case) go before plain lookups. */
   private active = 0;
-  private drain() {
+  private async drain() {
+    // Failed backfills (typically TronGrid 429 on the free tier) retry by themselves after a growing delay, up to MAX_BACKFILL_RETRIES times.
+    await this.db.$executeRaw`UPDATE "IndexedAddress" SET status = 'pending' WHERE status = 'error' AND (("retryAt" IS NOT NULL AND "retryAt" <= now()) OR (retries = 0 AND "retryAt" IS NULL))`; // retries = 0 + no schedule: failed before automatic retries existed
     while (this.active < 3) {
       this.active++;
       void this.worker().finally(() => this.active--);
@@ -180,37 +188,47 @@ export class TransferIndex implements OnModuleInit {
 
   private async worker() {
     for (;;) {
-      const [row] = await this.db.$queryRaw<{ chain: string; address: string }[]>`
-        UPDATE "IndexedAddress" SET status = 'backfilling', error = NULL
+      const [row] = await this.db.$queryRaw<{ chain: string; address: string; assets: string; rowCount: number; retries: number }[]>`
+        UPDATE "IndexedAddress" SET status = 'backfilling', error = NULL, "retryAt" = NULL
         WHERE id = (SELECT id FROM "IndexedAddress" WHERE status = 'pending' ORDER BY (reason <> 'lookup') DESC, id FOR UPDATE SKIP LOCKED LIMIT 1)
-        RETURNING chain, address`;
+        RETURNING chain, address, assets, "rowCount", retries`;
       if (!row) return;
-      await this.backfill(row.chain as Chain, row.address);
+      await this.backfill(row.chain as Chain, row.address, row.assets, row.rowCount, row.retries);
     }
   }
 
   // ponytail: a failed backfill restarts from the newest page (rows are idempotent). Resume-by-cursor if wallets get huge.
-  private async backfill(chain: Chain, address: string) {
+  /** Pages every registered asset that the wallet does not store yet (all of them for a new wallet, only the new one for an upgrade). */
+  private async backfill(chain: Chain, address: string, have: string, base: number, retries: number) {
     const startedAt = new Date();
     const seen = new Map<string, number>();
     const max = MAX_PER_ADDRESS();
+    const missing = assetsOf(chain).filter((d) => !have.split(',').includes(d.asset));
     let n = 0;
     let capped = false;
     try {
-      for await (const page of apiPages(chain, address)) {
-        await this.store(chain, page, seen);
-        n += page.length;
-        await this.db.indexedAddress.update({ where: { chain_address: { chain, address } }, data: { rowCount: n } });
-        if (n >= max) {
-          capped = true;
-          break;
+      for (const d of missing) {
+        let perAsset = 0;
+        for await (const page of apiPages(chain, address, { assets: [d] })) {
+          await this.store(chain, page, seen);
+          n += page.length;
+          perAsset += page.length;
+          await this.db.indexedAddress.update({ where: { chain_address: { chain, address } }, data: { rowCount: base + n } });
+          if (perAsset >= max) {
+            capped = true;
+            break;
+          }
         }
       }
-      await this.finish(chain, address, startedAt, capped ? 'capped' : 'complete');
-      this.log.log(`backfill ${chain}:${address} -> ${capped ? 'capped' : 'complete'} (${n} rows)`);
+      await this.finish(chain, address, startedAt, capped ? 'capped' : 'complete', assetsCsv(chain));
+      this.log.log(`backfill ${chain}:${address} [${missing.map((d) => d.asset)}] -> ${capped ? 'capped' : 'complete'} (${n} rows)`);
     } catch (e) {
-      this.log.warn(`backfill ${address} failed: ${(e as Error).message}`);
-      await this.db.indexedAddress.update({ where: { chain_address: { chain, address } }, data: { status: 'error', error: (e as Error).message.slice(0, 500) } });
+      const attempt = retries + 1;
+      this.log.warn(`backfill ${address} failed (attempt ${attempt}): ${(e as Error).message}`);
+      await this.db.indexedAddress.update({
+        where: { chain_address: { chain, address } },
+        data: { status: 'error', error: (e as Error).message.slice(0, 500), retries: attempt, retryAt: attempt <= MAX_BACKFILL_RETRIES ? new Date(Date.now() + retryDelayMs(attempt)) : null },
+      });
     }
   }
 
@@ -251,7 +269,7 @@ export class TransferIndex implements OnModuleInit {
             const to = r.to ?? r['1'];
             const value = r.value ?? r['2'];
             if (!from || !to || value === undefined) continue;
-            rows.push({ hash: e.transaction_id, from: hexToTron(from), to: hexToTron(to), amount: Number(value) / 1e6, timestamp: e.block_timestamp });
+            rows.push({ asset: 'usdt', hash: e.transaction_id, from: hexToTron(from), to: hexToTron(to), amount: parseUnits(String(value), 6), timestamp: e.block_timestamp });
           }
           url = j.meta?.links?.next;
         }
@@ -292,7 +310,7 @@ export class TransferIndex implements OnModuleInit {
         for (const b of new Set(logs.map((l) => Number(l.blockNumber)))) ts.set(b, await blockTs(b));
         const rows: Row[] = logs
           .filter((l) => l.topics?.length === 3)
-          .map((l) => ({ hash: l.transactionHash, from: '0x' + l.topics[1].slice(-40), to: '0x' + l.topics[2].slice(-40), amount: Number(BigInt(l.data)) / 1e6, timestamp: ts.get(Number(l.blockNumber))!, block: Number(l.blockNumber) }));
+          .map((l) => ({ asset: 'usdt', hash: l.transactionHash, from: '0x' + l.topics[1].slice(-40), to: '0x' + l.topics[2].slice(-40), amount: parseUnits(BigInt(l.data), 6), timestamp: ts.get(Number(l.blockNumber))!, block: Number(l.blockNumber) }));
         const inserted = await this.store('eth', rows);
         from = to + 1;
         await this.advance('eth', from, await blockTs(to), inserted);
@@ -365,13 +383,13 @@ export class IndexController {
   @Perm('index.manage')
   @Post('addresses')
   async add(@CurrentCtx() ctx: Ctx, @Body() b: any) {
-    const { chain, addr } = parseAddr(str(b?.address, 'address', { max: 100 }));
+    const { chain, addr } = parseAddr(str(b?.address, 'address', { max: 100 }), b?.chain);
     const cur = await this.idx.coverage(chain, addr);
     if (cur?.status === 'backfilling') throw new ConflictException('A backfill is already running for this wallet');
     await this.db.indexedAddress.upsert({
       where: { chain_address: { chain, address: addr } },
       create: { chain, address: addr, reason: 'manual' },
-      update: { status: 'pending', error: null },
+      update: { status: 'pending', error: null, retries: 0, retryAt: null },
     });
     await audit(this.db, ctx, 'index.backfill', `${chain}:${addr}`);
     return { ok: true };
@@ -380,8 +398,8 @@ export class IndexController {
   /** Incremental sync now: fetches only rows newer than the newest stored. */
   @Perm('index.manage')
   @Post('addresses/:addr/sync')
-  async sync(@CurrentCtx() ctx: Ctx, @Param('addr') raw: string) {
-    const { chain, addr } = parseAddr(raw);
+  async sync(@CurrentCtx() ctx: Ctx, @Param('addr') raw: string, @Query('chain') c?: string) {
+    const { chain, addr } = parseAddr(raw, c);
     const cov = found(await this.idx.coverage(chain, addr), 'Wallet is not in the index');
     if (cov.status !== 'complete' && cov.status !== 'capped') throw new ConflictException(`Wallet is ${cov.status}; only complete or capped wallets can be re-synced`);
     await this.idx.syncOnce(cov);
@@ -392,8 +410,8 @@ export class IndexController {
   /** Drops the coverage row; stored transfers stay (other wallets' histories share them) but reads go back to the live API. */
   @Perm('index.manage')
   @Delete('addresses/:addr')
-  async remove(@CurrentCtx() ctx: Ctx, @Param('addr') raw: string) {
-    const { chain, addr } = parseAddr(raw);
+  async remove(@CurrentCtx() ctx: Ctx, @Param('addr') raw: string, @Query('chain') c?: string) {
+    const { chain, addr } = parseAddr(raw, c);
     const cov = found(await this.idx.coverage(chain, addr), 'Wallet is not in the index');
     if (cov.status === 'backfilling') throw new ConflictException('A backfill is running for this wallet; try again when it finishes');
     await this.db.indexedAddress.delete({ where: { id: cov.id } });

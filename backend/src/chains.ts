@@ -1,39 +1,43 @@
 import { BadRequestException, BadGatewayException, NotFoundException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
+import { Asset, AssetDef, AssetFilter, assetByContract, assetsOf, Chain, freezeAbi, issuerName, parseUnits, selectAssets } from './assets';
 import { splitBoundary } from './index-rules';
 import { cacheGet, cacheSet } from './kv';
 
-export type Chain = 'tron' | 'eth';
+export type { Asset, AssetFilter, Chain };
 export interface Transfer {
   hash: string;
   from: string;
   to: string;
-  amount: number; // USDT, 6 decimals applied
+  amount: number; // token units (decimals applied). USDT and USDC are both ≈ 1 USD
+  asset: Asset;
   timestamp: number; // ms
-  block?: number; // Ethereum only (TronGrid's per-account list has none)
+  block?: number; // EVM chains only (TronGrid's per-account list has none)
 }
 export interface TransferRef {
   hash: string;
   amount: number;
   timestamp: number;
+  asset: Asset;
 }
 export interface Flow {
   address: string;
-  in: number;
+  in: number; // all assets together (USD-equivalent)
   out: number;
   inCount: number;
   outCount: number;
   inTransfers?: TransferRef[]; // only with flows(..., true): newest first, max MAX_EDGE_TRANSFERS
   outTransfers?: TransferRef[];
+  asset?: Asset; // set on `parts` entries
+  parts?: Flow[]; // only with flows(..., perAsset = true): the same counterparty split by asset
 }
 export const MAX_EDGE_TRANSFERS = 50;
 
-const TRON_USDT = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t';
-const ETH_USDT = '0xdac17f958d2ee523a2206206994597c13d831ec7';
 const TRONGRID = 'https://api.trongrid.io';
-const ETHERSCAN = 'https://api.etherscan.io/v2/api?chainid=1';
+const ETHERSCAN_CHAIN_ID: Record<'eth' | 'bsc', number> = { eth: 1, bsc: 56 };
 const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 
+/** 0x addresses exist on every EVM chain: this returns the default (Ethereum). The caller picks BSC explicitly (see parseAddr). */
 export function detectChain(addr: string): Chain | null {
   if (/^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(addr)) return 'tron';
   if (/^0x[0-9a-fA-F]{40}$/.test(addr)) return 'eth';
@@ -64,6 +68,8 @@ export function hexToTron(hex20: string): string {
   }
   return out;
 }
+
+export const isEvm = (c: Chain) => c !== 'tron';
 
 export function isTxHash(chain: Chain, hash: string): boolean {
   return chain === 'tron' ? /^[0-9a-fA-F]{64}$/.test(hash) : /^0x[0-9a-fA-F]{64}$/.test(hash);
@@ -154,32 +160,39 @@ export const tronGap = () => (process.env.TRONGRID_API_KEY ? 80 : 350);
 
 export interface PageOpts {
   minTs?: number; // only rows at or after this ms timestamp (inclusive, so a tx is never split)
-  minBlock?: number; // Ethereum equivalent
+  minBlock?: number; // EVM equivalent
   fresh?: boolean;
   pageSize?: number;
+  assets?: AssetFilter | AssetDef[]; // default: every asset registered for the chain
 }
 
-async function* tronPages(addr: string, o: PageOpts): AsyncGenerator<Transfer[]> {
+async function* tronPages(addr: string, o: PageOpts, d: AssetDef): AsyncGenerator<Transfer[]> {
   let url: string | undefined =
-    `${TRONGRID}/v1/accounts/${addr}/transactions/trc20?only_confirmed=true&limit=200&contract_address=${TRON_USDT}` + (o.minTs ? `&min_timestamp=${o.minTs}` : '');
+    `${TRONGRID}/v1/accounts/${addr}/transactions/trc20?only_confirmed=true&limit=200&contract_address=${d.contract}` + (o.minTs ? `&min_timestamp=${o.minTs}` : '');
   while (url) {
     const j = await fetchJson(url, { headers: tronHeaders() }, tronGap(), o.fresh);
-    yield (j.data ?? []).map((t: any) => ({ hash: t.transaction_id, from: t.from, to: t.to, amount: Number(t.value) / 1e6, timestamp: t.block_timestamp }));
+    // TronGrid mixes Approval events into this list (often uint256-max values) — they move no funds.
+    yield (j.data ?? []).filter((t: any) => t.type === 'Transfer').map((t: any) => ({ hash: t.transaction_id, from: t.from, to: t.to, amount: parseUnits(t.value, d.decimals), asset: d.asset, timestamp: t.block_timestamp }));
     url = j.meta?.links?.next;
   }
 }
 
-async function tronBalance(addr: string): Promise<number> {
+async function tronBalances(addr: string): Promise<Record<Asset, number>> {
   const j = await fetchJson(`${TRONGRID}/v1/accounts/${addr}`, { headers: tronHeaders() }, tronGap());
-  const entry = (j.data?.[0]?.trc20 ?? []).find((o: Record<string, string>) => TRON_USDT in o);
-  return entry ? Number(entry[TRON_USDT]) / 1e6 : 0;
+  const held: Record<string, string>[] = j.data?.[0]?.trc20 ?? [];
+  const out = {} as Record<Asset, number>;
+  for (const d of assetsOf('tron')) {
+    const e = held.find((o) => d.contract in o);
+    out[d.asset] = e ? parseUnits(e[d.contract], d.decimals) : 0;
+  }
+  return out;
 }
 
-async function tronFrozen(addr: string): Promise<boolean> {
+async function tronFrozen(addr: string, d: AssetDef): Promise<boolean> {
   const body = JSON.stringify({
     owner_address: addr,
-    contract_address: TRON_USDT,
-    function_selector: 'isBlackListed(address)',
+    contract_address: d.contract,
+    function_selector: d.issuer === 'circle' ? 'isBlacklisted(address)' : 'isBlackListed(address)',
     parameter: tronToHex20(addr).padStart(64, '0'),
     visible: true,
   });
@@ -192,13 +205,13 @@ async function tronFrozen(addr: string): Promise<boolean> {
   return r ? BigInt('0x' + r) === 1n : false;
 }
 
-// ---------- Ethereum (ERC20) ----------
+// ---------- EVM: Ethereum + BNB Smart Chain (Etherscan v2, one key for both) ----------
 export const hasEtherscanKey = () => !!process.env.ETHERSCAN_API_KEY;
 
-async function etherscan(params: string, fresh = false): Promise<any> {
+async function etherscan(chain: 'eth' | 'bsc', params: string, fresh = false): Promise<any> {
   const key = process.env.ETHERSCAN_API_KEY;
-  if (!key) throw new BadRequestException('ETHERSCAN_API_KEY is not set in backend/.env — needed for ERC20 addresses');
-  const j = await fetchJson(`${ETHERSCAN}&${params}&apikey=${key}`, {}, 220, fresh);
+  if (!key) throw new BadRequestException('ETHERSCAN_API_KEY is not set in backend/.env — needed for Ethereum and BNB Chain addresses');
+  const j = await fetchJson(`https://api.etherscan.io/v2/api?chainid=${ETHERSCAN_CHAIN_ID[chain]}&${params}&apikey=${key}`, {}, 220, fresh);
   if (j.error) throw new BadGatewayException(`Etherscan: ${j.error.message ?? JSON.stringify(j.error)}`);
   if (j.status === '0' && !/no transactions/i.test(j.message ?? '')) {
     throw new BadGatewayException(`Etherscan: ${typeof j.result === 'string' ? j.result : j.message}`);
@@ -206,13 +219,14 @@ async function etherscan(params: string, fresh = false): Promise<any> {
   return j.result;
 }
 
-async function* ethPages(addr: string, o: PageOpts): AsyncGenerator<Transfer[]> {
+async function* evmPages(chain: 'eth' | 'bsc', addr: string, o: PageOpts, d: AssetDef): AsyncGenerator<Transfer[]> {
   // Etherscan caps rows per call, so walk backwards block range by block range (newest first).
   const offset = o.pageSize ?? 10000;
   let end: number | null = null;
   do {
     const rows = await etherscan(
-      `module=account&action=tokentx&contractaddress=${ETH_USDT}&address=${addr}&page=1&offset=${offset}&sort=desc` +
+      chain,
+      `module=account&action=tokentx&contractaddress=${d.contract}&address=${addr}&page=1&offset=${offset}&sort=desc` +
         (o.minBlock ? `&startblock=${o.minBlock}` : '') +
         (end !== null ? `&endblock=${end}` : ''),
       o.fresh,
@@ -221,7 +235,8 @@ async function* ethPages(addr: string, o: PageOpts): AsyncGenerator<Transfer[]> 
       hash: t.hash,
       from: t.from,
       to: t.to,
-      amount: Number(t.value) / 1e6,
+      amount: parseUnits(t.value, d.decimals),
+      asset: d.asset,
       timestamp: Number(t.timeStamp) * 1000,
       block: Number(t.blockNumber),
     }));
@@ -231,15 +246,15 @@ async function* ethPages(addr: string, o: PageOpts): AsyncGenerator<Transfer[]> 
   } while (end !== null);
 }
 
-async function ethBalance(addr: string): Promise<number> {
-  const r = await etherscan(`module=account&action=tokenbalance&contractaddress=${ETH_USDT}&address=${addr}&tag=latest`);
-  return Number(r) / 1e6;
+async function evmBalances(chain: 'eth' | 'bsc', addr: string): Promise<Record<Asset, number>> {
+  const out = {} as Record<Asset, number>;
+  for (const d of assetsOf(chain)) out[d.asset] = parseUnits(await etherscan(chain, `module=account&action=tokenbalance&contractaddress=${d.contract}&address=${addr}&tag=latest`), d.decimals);
+  return out;
 }
 
-async function ethFrozen(addr: string): Promise<boolean> {
-  // 0xe47d6060 = isBlackListed(address) on the USDT contract
-  const data = '0xe47d6060' + addr.slice(2).padStart(64, '0');
-  const r = await etherscan(`module=proxy&action=eth_call&to=${ETH_USDT}&data=${data}&tag=latest`);
+async function evmFrozen(chain: 'eth' | 'bsc', addr: string, d: AssetDef): Promise<boolean> {
+  const data = freezeAbi(d.issuer!).isFrozen + addr.slice(2).padStart(64, '0');
+  const r = await etherscan(chain, `module=proxy&action=eth_call&to=${d.contract}&data=${data}&tag=latest`);
   return typeof r === 'string' && r.length > 2 ? BigInt(r) === 1n : false;
 }
 
@@ -250,7 +265,7 @@ export interface TxDetail {
   block: number;
   timestamp: number;
   success: boolean;
-  transfers: { from: string; to: string; amount: number }[]; // USDT transfers only
+  transfers: { from: string; to: string; amount: number; asset: Asset }[]; // tracked stablecoin transfers only
 }
 const TRANSFER_TOPIC = 'ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 
@@ -261,7 +276,7 @@ async function tronTx(hash: string): Promise<TxDetail> {
     tronGap(),
   );
   if (!j?.id) throw new NotFoundException('Transaction not found on Tron');
-  const usdtHex = tronToHex20(TRON_USDT);
+  const byHex = new Map(assetsOf('tron').map((d) => [tronToHex20(d.contract), d]));
   return {
     chain: 'tron',
     hash,
@@ -269,49 +284,56 @@ async function tronTx(hash: string): Promise<TxDetail> {
     timestamp: j.blockTimeStamp,
     success: j.receipt?.result === 'SUCCESS',
     transfers: (j.log ?? [])
-      .filter((l: any) => l.address?.slice(-40) === usdtHex && l.topics?.[0] === TRANSFER_TOPIC)
-      .map((l: any) => ({ from: hexToTron(l.topics[1]), to: hexToTron(l.topics[2]), amount: Number(BigInt('0x' + l.data)) / 1e6 })),
+      .filter((l: any) => byHex.has(l.address?.slice(-40)) && l.topics?.[0] === TRANSFER_TOPIC)
+      .map((l: any) => {
+        const d = byHex.get(l.address.slice(-40))!;
+        return { from: hexToTron(l.topics[1]), to: hexToTron(l.topics[2]), amount: parseUnits(BigInt('0x' + l.data), d.decimals), asset: d.asset };
+      }),
   };
 }
 
-async function ethTx(hash: string): Promise<TxDetail> {
-  const r = await etherscan(`module=proxy&action=eth_getTransactionReceipt&txhash=${hash}`);
-  if (!r) throw new NotFoundException('Transaction not found on Ethereum');
-  const b = await etherscan(`module=proxy&action=eth_getBlockByNumber&tag=${r.blockNumber}&boolean=false`);
+async function evmTx(chain: 'eth' | 'bsc', hash: string): Promise<TxDetail> {
+  const r = await etherscan(chain, `module=proxy&action=eth_getTransactionReceipt&txhash=${hash}`);
+  if (!r) throw new NotFoundException(`Transaction not found on ${chain === 'bsc' ? 'BNB Chain' : 'Ethereum'}`);
+  const b = await etherscan(chain, `module=proxy&action=eth_getBlockByNumber&tag=${r.blockNumber}&boolean=false`);
   return {
-    chain: 'eth',
+    chain,
     hash,
     block: Number(r.blockNumber),
     timestamp: Number(b?.timestamp ?? 0) * 1000,
     success: r.status === '0x1',
-    transfers: (r.logs ?? [])
-      .filter((l: any) => l.address?.toLowerCase() === ETH_USDT && l.topics?.[0] === '0x' + TRANSFER_TOPIC)
-      .map((l: any) => ({ from: '0x' + l.topics[1].slice(-40), to: '0x' + l.topics[2].slice(-40), amount: Number(BigInt(l.data)) / 1e6 })),
+    transfers: (r.logs ?? []).flatMap((l: any) => {
+      const d = assetByContract(chain, l.address ?? '');
+      if (!d || l.topics?.[0] !== '0x' + TRANSFER_TOPIC || l.topics.length !== 3) return [];
+      return [{ from: '0x' + l.topics[1].slice(-40), to: '0x' + l.topics[2].slice(-40), amount: parseUnits(BigInt(l.data), d.decimals), asset: d.asset }];
+    }),
   };
 }
 
-// ---------- Tether freeze events ----------
-export const FREEZE_TOPICS = {
-  added: '42e160154868087d6bfdc0ca23d96a1c1cfa32f1b72ba9ba27b69b98a0d819dc', // AddedBlackList(address)
-  removed: 'd7e9ec6e6ecd65492dce6bf513cd6867560d49544421d0783ddf06e76c24470c', // RemovedBlackList(address)
-};
+// ---------- Issuer freeze events (Tether AddedBlackList/RemovedBlackList, Circle Blacklisted/UnBlacklisted) ----------
 export interface FreezeEvent {
   address: string;
   added: boolean;
-  ts: number; // ms (Tron) or block number (Eth) — used only as a sync cursor
+  ts: number; // ms (Tron) or block number (EVM) — used only as a sync cursor
+  idx?: number;
 }
+const TRON_EVENT_NAMES = {
+  tether: { added: 'AddedBlackList', removed: 'RemovedBlackList' },
+  circle: { added: 'Blacklisted', removed: 'UnBlacklisted' },
+};
 
-/** All Tron freeze + unfreeze events at or after `minTs`, merged oldest first. */
-export async function tronFreezeEvents(minTs: number, maxPages = 100): Promise<FreezeEvent[]> {
+/** All Tron freeze + unfreeze events of one issuer's contract at or after `minTs`, merged oldest first. */
+export async function tronFreezeEvents(issuer: 'tether' | 'circle', minTs: number, maxPages = 100): Promise<FreezeEvent[]> {
+  const d = assetsOf('tron').find((x) => x.issuer === issuer)!;
   const events: FreezeEvent[] = [];
-  for (const name of ['AddedBlackList', 'RemovedBlackList']) {
+  for (const [kind, name] of Object.entries(TRON_EVENT_NAMES[issuer])) {
     let url: string | undefined =
-      `${TRONGRID}/v1/contracts/${TRON_USDT}/events?event_name=${name}&only_confirmed=true&order_by=block_timestamp,asc&limit=200&min_block_timestamp=${minTs}`;
+      `${TRONGRID}/v1/contracts/${d.contract}/events?event_name=${name}&only_confirmed=true&order_by=block_timestamp,asc&limit=200&min_block_timestamp=${minTs}`;
     for (let p = 0; url && p < maxPages; p++) {
       const j = await fetchJson(url, { headers: tronHeaders() }, tronGap(), true);
       for (const e of j.data ?? []) {
-        const raw = e.result?._user ?? e.result?.['0'];
-        if (raw) events.push({ address: hexToTron(raw), added: name === 'AddedBlackList', ts: e.block_timestamp });
+        const raw = e.result?._user ?? e.result?._account ?? e.result?.['0'];
+        if (raw) events.push({ address: hexToTron(raw), added: kind === 'added', ts: e.block_timestamp });
       }
       url = j.meta?.links?.next;
     }
@@ -319,80 +341,118 @@ export async function tronFreezeEvents(minTs: number, maxPages = 100): Promise<F
   return events.sort((a, b) => a.ts - b.ts);
 }
 
-/** Ethereum freeze events from `fromBlock` (one Etherscan page per kind, merged oldest first). */
-export async function ethFreezeEvents(fromBlock: number): Promise<{ events: FreezeEvent[]; full: boolean }> {
-  const page = async (topic: string, added: boolean) => {
-    const rows = await etherscan(`module=logs&action=getLogs&address=${ETH_USDT}&topic0=0x${topic}&fromBlock=${fromBlock}&toBlock=latest&page=1&offset=1000`, true);
-    return (Array.isArray(rows) ? rows : []).map((l: any) => ({
-      // Ethereum USDT emits the address as non-indexed data; handle indexed too for safety.
-      address: '0x' + (l.topics?.[1] ?? l.data).slice(-40).toLowerCase(),
-      added,
-      ts: Number(l.blockNumber),
-      idx: Number(l.logIndex),
-    }));
+/** One Etherscan getLogs row -> event. Tether emits the address as non-indexed data, Circle as indexed topic 1; both handled. */
+export function parseFreezeLog(l: { topics?: string[]; data?: string; blockNumber: string; logIndex?: string }, issuer: 'tether' | 'circle'): FreezeEvent | null {
+  const abi = freezeAbi(issuer);
+  const t0 = (l.topics?.[0] ?? '').replace(/^0x/, '').toLowerCase();
+  if (t0 !== abi.added && t0 !== abi.removed) return null;
+  const raw = l.topics?.[1] ?? l.data;
+  if (!raw || raw.length < 42) return null;
+  return { address: '0x' + raw.slice(-40).toLowerCase(), added: t0 === abi.added, ts: Number(l.blockNumber), idx: Number(l.logIndex ?? 0) };
+}
+
+/** Ethereum freeze events of one issuer from `fromBlock` (one Etherscan page per kind, merged oldest first). */
+export async function ethFreezeEvents(issuer: 'tether' | 'circle', fromBlock: number): Promise<{ events: FreezeEvent[]; full: boolean }> {
+  const d = assetsOf('eth').find((x) => x.issuer === issuer)!;
+  const abi = freezeAbi(issuer);
+  const page = async (topic: string) => {
+    const rows = await etherscan('eth', `module=logs&action=getLogs&address=${d.contract}&topic0=0x${topic}&fromBlock=${fromBlock}&toBlock=latest&page=1&offset=1000`, true);
+    return (Array.isArray(rows) ? rows : []).flatMap((l: any) => parseFreezeLog(l, issuer) ?? []);
   };
-  const a = await page(FREEZE_TOPICS.added, true);
-  const r = await page(FREEZE_TOPICS.removed, false);
-  const events = [...a, ...r].sort((x, y) => x.ts - y.ts || x.idx - y.idx);
+  const a = await page(abi.added);
+  const r = await page(abi.removed);
+  const events = [...a, ...r].sort((x, y) => x.ts - y.ts || (x.idx ?? 0) - (y.idx ?? 0));
   return { events, full: a.length === 1000 || r.length === 1000 };
 }
 
 // ---------- Public API ----------
-export const getTx = (c: Chain, hash: string) => (c === 'tron' ? tronTx(hash) : ethTx(hash.toLowerCase()));
-/** Newest-first pages straight from the explorer API. Never touches Postgres. */
-export const apiPages = (c: Chain, a: string, o: PageOpts = {}) => (c === 'tron' ? tronPages(a, o) : ethPages(a, o));
+export const getTx = (c: Chain, hash: string) => (c === 'tron' ? tronTx(hash) : evmTx(c, hash.toLowerCase()));
 
-/** Live API read of the newest `max` transfers. */
-export async function apiTransfers(c: Chain, a: string, max: number, fresh = false): Promise<Transfer[]> {
-  const out: Transfer[] = [];
-  for await (const page of apiPages(c, a, { fresh, pageSize: Math.min(max, 10000) })) {
-    out.push(...page);
-    if (out.length >= max) break;
-  }
-  return out.slice(0, max);
+const defsFor = (c: Chain, a?: PageOpts['assets']): AssetDef[] => (Array.isArray(a) ? a : selectAssets(c, a));
+
+/** Newest-first pages straight from the explorer API, one asset after the other. Never touches Postgres. */
+export async function* apiPages(c: Chain, a: string, o: PageOpts = {}): AsyncGenerator<Transfer[]> {
+  for (const d of defsFor(c, o.assets)) yield* c === 'tron' ? tronPages(a, o, d) : evmPages(c, a, o, d);
+}
+
+/** Live API read of the newest `max` transfers across the chosen assets (each asset is fetched concurrently, then merged). */
+export async function apiTransfers(c: Chain, a: string, max: number, fresh = false, assets: AssetFilter = 'all'): Promise<Transfer[]> {
+  const per = await Promise.all(
+    defsFor(c, assets).map(async (d) => {
+      const out: Transfer[] = [];
+      for await (const page of apiPages(c, a, { fresh, pageSize: Math.min(max, 10000), assets: [d] })) {
+        out.push(...page);
+        if (out.length >= max) break;
+      }
+      return out.slice(0, max);
+    }),
+  );
+  return per.length === 1 ? per[0] : per.flat().sort((x, y) => y.timestamp - x.timestamp).slice(0, max);
 }
 
 /** Why a read happened. `graph` = a neighbour node: rows are written through but no backfill is queued. */
 export type Reason = 'lookup' | 'watch' | 'case' | 'manual' | 'graph';
-type ReadThrough = (c: Chain, a: string, max: number, fresh: boolean, reason: Reason) => Promise<Transfer[]>;
+type ReadThrough = (c: Chain, a: string, max: number, fresh: boolean, reason: Reason, assets: AssetFilter) => Promise<Transfer[]>;
 let readThrough: ReadThrough | null = null;
 /** TransferIndex registers itself here at boot; before that (and in selfcheck) reads go straight to the API. */
 export const setReadThrough = (fn: ReadThrough | null) => void (readThrough = fn);
 
 /** THE choke point for address history: Postgres index when the wallet is covered, live API otherwise (see transfer-index.ts). */
-export const getTransfers = (c: Chain, a: string, max = 200, fresh = false, reason: Reason = 'lookup') =>
-  readThrough ? readThrough(c, a, max, fresh, reason) : apiTransfers(c, a, max, fresh);
-export const getBalance = (c: Chain, a: string) => (c === 'tron' ? tronBalance(a) : ethBalance(a));
-export const isTetherFrozen = (c: Chain, a: string) => (c === 'tron' ? tronFrozen(a) : ethFrozen(a));
+export const getTransfers = (c: Chain, a: string, max = 200, fresh = false, reason: Reason = 'lookup', assets: AssetFilter = 'all') =>
+  readThrough ? readThrough(c, a, max, fresh, reason, assets) : apiTransfers(c, a, max, fresh, assets);
+export const getBalances = (c: Chain, a: string) => (c === 'tron' ? tronBalances(a) : evmBalances(c, a));
 
-/** Aggregate transfers by counterparty, sorted by total volume desc. */
-export function flows(addr: string, transfers: Transfer[], withTransfers = false): Flow[] {
-  const me = norm(addr);
-  const m = new Map<string, Flow>();
-  for (const t of transfers) {
-    const incoming = norm(t.to) === me;
-    const other = norm(incoming ? t.from : t.to);
-    if (other === me) continue;
-    const f = m.get(other) ?? { address: other, in: 0, out: 0, inCount: 0, outCount: 0 };
-    if (incoming) {
-      f.in += t.amount;
-      f.inCount++;
-    } else {
-      f.out += t.amount;
-      f.outCount++;
+/** Per asset: true/false = the issuer's blacklist says so; null = this token has no issuer freeze (BSC pegged tokens). */
+export type FrozenMap = Record<Asset, boolean | null>;
+export async function frozenStatus(c: Chain, a: string): Promise<FrozenMap> {
+  const out = {} as FrozenMap;
+  await Promise.all(
+    assetsOf(c).map(async (d) => {
+      out[d.asset] = !d.issuer ? null : c === 'tron' ? await tronFrozen(a, d) : await evmFrozen(c as 'eth', a, d);
+    }),
+  );
+  return out;
+}
+/** Issuer names that currently have the wallet frozen, e.g. ['Tether', 'Circle']. */
+export const frozenBy = (c: Chain, m: FrozenMap): string[] => [...new Set(assetsOf(c).filter((d) => m[d.asset] && d.issuer).map((d) => issuerName[d.issuer!]))];
+
+/** Aggregate transfers by counterparty, sorted by total volume desc. `perAsset` also splits each counterparty into `parts` per asset (graph edges). */
+export function flows(addr: string, transfers: Transfer[], withTransfers = false, perAsset = false): Flow[] {
+  const agg = (list: Transfer[]) => {
+    const me = norm(addr);
+    const m = new Map<string, Flow>();
+    for (const t of list) {
+      const incoming = norm(t.to) === me;
+      const other = norm(incoming ? t.from : t.to);
+      if (other === me) continue;
+      const f = m.get(other) ?? { address: other, in: 0, out: 0, inCount: 0, outCount: 0 };
+      if (incoming) {
+        f.in += t.amount;
+        f.inCount++;
+      } else {
+        f.out += t.amount;
+        f.outCount++;
+      }
+      if (withTransfers) {
+        const key = incoming ? 'inTransfers' : 'outTransfers';
+        (f[key] ??= []).push({ hash: t.hash, amount: t.amount, timestamp: t.timestamp, asset: t.asset });
+      }
+      m.set(other, f);
     }
     if (withTransfers) {
-      const key = incoming ? 'inTransfers' : 'outTransfers';
-      (f[key] ??= []).push({ hash: t.hash, amount: t.amount, timestamp: t.timestamp });
+      const newest = (a: TransferRef, b: TransferRef) => b.timestamp - a.timestamp;
+      for (const f of m.values()) {
+        f.inTransfers = f.inTransfers?.sort(newest).slice(0, MAX_EDGE_TRANSFERS);
+        f.outTransfers = f.outTransfers?.sort(newest).slice(0, MAX_EDGE_TRANSFERS);
+      }
     }
-    m.set(other, f);
-  }
-  if (withTransfers) {
-    const newest = (a: TransferRef, b: TransferRef) => b.timestamp - a.timestamp;
-    for (const f of m.values()) {
-      f.inTransfers = f.inTransfers?.sort(newest).slice(0, MAX_EDGE_TRANSFERS);
-      f.outTransfers = f.outTransfers?.sort(newest).slice(0, MAX_EDGE_TRANSFERS);
+    return m;
+  };
+  const all = agg(transfers);
+  if (perAsset) {
+    for (const asset of new Set(transfers.map((t) => t.asset))) {
+      for (const f of agg(transfers.filter((t) => t.asset === asset)).values()) (all.get(f.address)!.parts ??= []).push({ ...f, asset });
     }
   }
-  return [...m.values()].sort((a, b) => b.in + b.out - (a.in + a.out));
+  return [...all.values()].sort((a, b) => b.in + b.out - (a.in + a.out));
 }

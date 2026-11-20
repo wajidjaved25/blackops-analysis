@@ -6,7 +6,8 @@ import { useState } from 'react';
 import { AddressLink } from '@/components/Risk';
 import { Badge, Button, Card, EmptyState, Input, LinkButton, PageHeader, SkeletonRows, Stat, Time } from '@/components/ui';
 import { useAuth } from '@/lib/auth';
-import { detectChain, detectTx, num, short } from '@/lib/format';
+import { ChainChoice } from '@/components/Assets';
+import { addrHref, Chain, detectChain, detectTx, num, short } from '@/lib/format';
 import { useApi } from '@/lib/hooks';
 
 interface Alert { id: number; chain: string; address: string; counterparty?: string; amount: number; status: string; createdAt: string; rule?: { type: string }; watchItem?: { watchlist?: { name: string } } }
@@ -20,6 +21,7 @@ export default function Dashboard() {
   const { can, me } = useAuth();
   const router = useRouter();
   const [q, setQ] = useState('');
+  const [evm, setEvm] = useState<'eth' | 'bsc'>('eth');
   const [err, setErr] = useState('');
   const alerts = useApi<{ rows: Alert[]; total: number }>(can('monitor.view') ? '/alerts?status=open' : null);
   const cases = useApi<CaseRow[]>(can('cases.view') ? '/cases' : null);
@@ -35,14 +37,14 @@ export default function Dashboard() {
     e.preventDefault();
     const s = q.trim();
     const tx = detectTx(s);
-    if (detectChain(s)) router.push(`/address/${s}`);
-    else if (tx) router.push(`/tx/${tx}/${s}`);
-    else setErr('Enter a valid Tron (T…) or Ethereum (0x…) address, or a transaction hash.');
+    if (detectChain(s)) router.push(addrHref(s, evm));
+    else if (tx) router.push(`/tx/${tx === 'eth' ? evm : tx}/${s}`);
+    else setErr('Enter a valid Tron (T…) or Ethereum / BNB Chain (0x…) address, or a transaction hash.');
   }
 
   return (
     <div className="page stack" style={{ gap: 20 }}>
-      <PageHeader title={`Welcome back${me?.name ? `, ${me.name.split(' ')[0]}` : ''}`} sub="Trace USDT flows, screen wallets and monitor risk on Tron and Ethereum." />
+      <PageHeader title={`Welcome back${me?.name ? `, ${me.name.split(' ')[0]}` : ''}`} sub="Trace USDT and USDC flows, screen wallets and monitor risk on Tron, Ethereum and BNB Chain." />
       {can('investigate.view') && (
         <form className="card card-b stack sm" onSubmit={go} role="search" style={{ background: 'linear-gradient(135deg, var(--accent-soft), transparent 60%), var(--surface)' }}>
           <h2>Investigate a wallet or transaction</h2>
@@ -52,7 +54,8 @@ export default function Dashboard() {
             </div>
             <Button variant="primary" type="submit" style={{ height: 44 }}><Search size={16} />Investigate</Button>
           </div>
-          {err ? <span className="small bad" role="alert">{err}</span> : <span className="xs muted">Chain is detected automatically. Try the Graph workspace for a visual trace.</span>}
+          <ChainChoice addr={/^0x[0-9a-fA-F]{64}$/.test(q.trim()) ? '0x' + q.trim().slice(-40) : q} value={evm as Chain} onChange={setEvm} />
+          {err ? <span className="small bad" role="alert">{err}</span> : <span className="xs muted">Tron is detected automatically; for 0x input pick Ethereum or BNB Chain. Try the Graph workspace for a visual trace.</span>}
         </form>
       )}
       <div className="kpis">

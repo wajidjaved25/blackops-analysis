@@ -13,12 +13,13 @@ import { RadialHeatmap } from '@/components/charts';
 import { Badge, Button, Card, DateTime, EmptyState, ErrorState, Field, Input, LinkButton, Notice, PageHeader, Select, SkeletonRows, Tabs, Textarea, Time } from '@/components/ui';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { detectChain, num, short } from '@/lib/format';
+import { AssetTag, ChainChoice } from '@/components/Assets';
+import { Chain, chainQ, detectChain, money, short } from '@/lib/format';
 import { useApi } from '@/lib/hooks';
 
 interface CA { id: number; chain: string; address: string; role: string; note?: string }
 interface Case { id: number; title: string; description?: string; status: string; createdAt: string; updatedAt: string; graphJson?: unknown; graphPng?: string; addresses: CA[]; notes: { id: number; body: string; author?: { name?: string; email?: string } | string; createdAt: string }[]; files: { id: number; name: string; size: number; mime: string; createdAt: string }[] }
-interface TL { hash: string; from: string; to: string; amount: number; timestamp: number; hop: number | null }
+interface TL { hash: string; from: string; to: string; amount: number; asset?: string; timestamp: number; hop: number | null }
 type Tab = 'overview' | 'addresses' | 'graph' | 'timeline' | 'notes' | 'files';
 const authorName = (a: Case['notes'][number]['author']) => (typeof a === 'string' ? a : a?.name || a?.email || 'Unknown');
 const size = (n: number) => (n > 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1e3))} KB`);
@@ -76,7 +77,7 @@ export default function CaseDetail() {
                   {c.graphPng ? <img src={c.graphPng} alt="Saved fund-flow graph" style={{ maxWidth: '100%', borderRadius: 8, border: '1px solid var(--border)' }} /> : <EmptyState icon={<Network size={22} />} title="No graph saved" action={<LinkButton href="/graph" sm>Open graph workspace</LinkButton>}>Build a graph in the workspace and use “Save to case”.</EmptyState>}
                 </Card>
               )}
-              {tab === 'timeline' && <Timeline id={id} />}
+              {tab === 'timeline' && <Timeline id={id} addrs={c.addresses} />}
               {tab === 'notes' && <Notes c={c} manage={manage} act={act} />}
               {tab === 'files' && <Files c={c} manage={manage} act={act} />}
             </div>
@@ -95,19 +96,21 @@ type Act = (fn: () => Promise<unknown>, ok?: string) => Promise<void>;
 
 function Addresses({ c, manage, act }: { c: Case; manage: boolean; act: Act }) {
   const [f, setF] = useState({ address: '', role: 'suspect', note: '' });
+  const [evm, setEvm] = useState<'eth' | 'bsc'>('eth'); // a case remembers the chain per address
   const [risk, setRisk] = useState<Record<string, { level: string; score: number } | 'loading'>>({});
   const [del, setDel] = useState<CA | null>(null);
-  const bad = f.address && !detectChain(f.address.trim()) ? 'Not a valid Tron or Ethereum address' : '';
-  const check = async (a: string) => {
+  const bad = f.address && !detectChain(f.address.trim()) ? 'Not a valid Tron, Ethereum or BNB Chain address' : '';
+  const check = async (a: string, chain: string) => {
     setRisk((r) => ({ ...r, [a]: 'loading' }));
-    try { const x = await api<{ level: string; score: number }>(`/risk/${a}`); setRisk((r) => ({ ...r, [a]: x })); } catch { setRisk((r) => { const n = { ...r }; delete n[a]; return n; }); }
+    try { const x = await api<{ level: string; score: number }>(`/risk/${a}?${chainQ(chain)}`); setRisk((r) => ({ ...r, [a]: x })); } catch { setRisk((r) => { const n = { ...r }; delete n[a]; return n; }); }
   };
   return (
     <div className="stack">
       {manage && (
         <Card title="Add address">
-          <form className="row" style={{ alignItems: 'flex-start' }} onSubmit={async (e) => { e.preventDefault(); if (bad || !f.address) return; await act(() => api(`/cases/${c.id}/addresses`, { body: { address: f.address.trim(), role: f.role, note: f.note || undefined } }), 'Address added'); setF({ address: '', role: 'suspect', note: '' }); }}>
+          <form className="row" style={{ alignItems: 'flex-start' }} onSubmit={async (e) => { e.preventDefault(); if (bad || !f.address) return; await act(() => api(`/cases/${c.id}/addresses`, { body: { address: f.address.trim(), chain: evm === 'bsc' ? 'bsc' : undefined, role: f.role, note: f.note || undefined } }), 'Address added'); setF({ address: '', role: 'suspect', note: '' }); }}>
             <Field className="grow" error={bad}><Input className="mono" aria-label="Address" placeholder="T… or 0x…" value={f.address} onChange={(e) => setF({ ...f, address: e.target.value })} /></Field>
+            <ChainChoice addr={f.address} value={evm as Chain} onChange={setEvm} />
             <Select aria-label="Role" style={{ width: 150 }} value={f.role} onChange={(e) => setF({ ...f, role: e.target.value })}>{ROLES.map((r) => <option key={r}>{r}</option>)}</Select>
             <Input aria-label="Note" style={{ width: 220 }} placeholder="Note (optional)" value={f.note} onChange={(e) => setF({ ...f, note: e.target.value })} />
             <Button variant="primary" type="submit" disabled={!f.address || !!bad}><Plus size={14} />Add</Button>
@@ -118,10 +121,11 @@ function Addresses({ c, manage, act }: { c: Case; manage: boolean; act: Act }) {
         <Table caption="Case addresses" rows={c.addresses} rowKey={(a) => a.id}
           empty={<EmptyState title="No addresses yet">Add the suspect, victim and intermediary wallets of this case.</EmptyState>}
           cols={[
-            { key: 'a', header: 'Address', wrap: true, cell: (a) => <AddressLink address={a.address} /> },
+            { key: 'a', header: 'Address', wrap: true, cell: (a) => <AddressLink address={a.address} chain={a.chain} /> },
+            { key: 'ch', header: 'Chain', cell: (a) => <span className="muted">{a.chain}</span> },
             { key: 'r', header: 'Role', cell: (a) => manage ? <Select sm aria-label="Role" style={{ width: 130 }} value={a.role} onChange={(e) => act(() => api(`/case-addresses/${a.id}`, { method: 'PATCH', body: { role: e.target.value } }), 'Role updated')}>{ROLES.map((r) => <option key={r}>{r}</option>)}</Select> : <Badge>{a.role}</Badge> },
             { key: 'n', header: 'Note', wrap: true, cell: (a) => <span className="muted small">{a.note || '—'}</span> },
-            { key: 'k', header: 'Risk', cell: (a) => { const r = risk[a.address]; return r === 'loading' ? <span className="muted small">Checking…</span> : r ? <RiskBadge level={r.level} score={r.score} /> : <Button sm variant="ghost" onClick={() => check(a.address)}>Check risk</Button>; } },
+            { key: 'k', header: 'Risk', cell: (a) => { const r = risk[a.address]; return r === 'loading' ? <span className="muted small">Checking…</span> : r ? <RiskBadge level={r.level} score={r.score} /> : <Button sm variant="ghost" onClick={() => check(a.address, a.chain)}>Check risk</Button>; } },
             { key: 'x', header: '', cell: (a) => <Button sm variant="ghost" icon aria-label="Remove address" disabled={!manage} onClick={() => setDel(a)}><Trash2 size={14} /></Button> },
           ]} />
       </Card>
@@ -130,14 +134,14 @@ function Addresses({ c, manage, act }: { c: Case; manage: boolean; act: Act }) {
   );
 }
 
-function Timeline({ id }: { id: string }) {
+function Timeline({ id, addrs }: { id: string; addrs: CA[] }) {
   const { can } = useAuth();
   const { data: all, loading, error, status, reload } = useApi<TL[]>(`/cases/${id}/timeline`);
   const [full, setFull] = useState(false);
   const data = all && !full ? all.slice(0, 80) : all;
   if (loading) return <div className="card"><SkeletonRows /></div>;
   if (error) return <div className="card"><ErrorState error={error} status={status} onRetry={reload} /></div>;
-  if (!data?.length) return <div className="card"><EmptyState title="No transfers between the case addresses yet">The storyline shows USDT moving between the wallets in this case (and its saved graph), oldest first. Add more addresses or save a graph.</EmptyState></div>;
+  if (!data?.length) return <div className="card"><EmptyState title="No transfers between the case addresses yet">The storyline shows USDT and USDC moving between the wallets in this case (and its saved graph), oldest first. Add more addresses or save a graph.</EmptyState></div>;
   const hops = [...new Set(data.map((t) => t.hop))].sort((a, b) => (a ?? 1e9) - (b ?? 1e9));
   return (
     <div className="grid g-main" style={{ alignItems: 'start' }}>
@@ -149,8 +153,8 @@ function Timeline({ id }: { id: string }) {
               <h3>{h === null ? 'Not connected to the starting wallet' : h <= 1 ? 'Hop 1: touching the starting wallet' : `Hop ${h}: ${h} steps away`}</h3>
               {data.filter((t) => t.hop === h).map((t, i) => (
                 <div key={i} className="row" style={{ borderLeft: '2px solid var(--accent)', paddingLeft: 12, marginLeft: 4, gap: 6 }}>
-                  <span className="muted small"><DateTime t={t.timestamp} /></span><AddressLink address={t.from} /><span className="muted small">sent</span><strong>{num(t.amount)} USDT</strong><span className="muted small">to</span><AddressLink address={t.to} />
-                  <span className="end"><TxLink hash={t.hash} chain={detectChain(t.from) ?? 'tron'} /></span>
+                  <span className="muted small"><DateTime t={t.timestamp} /></span><AddressLink address={t.from} /><span className="muted small">sent</span><strong>{money(t.amount, t.asset)}</strong> <AssetTag asset={t.asset} /><span className="muted small">to</span><AddressLink address={t.to} />
+                  <span className="end"><TxLink hash={t.hash} chain={addrs.find((a) => a.address === t.from || a.address === t.to)?.chain ?? detectChain(t.from) ?? 'tron'} /></span>
                 </div>
               ))}
             </section>

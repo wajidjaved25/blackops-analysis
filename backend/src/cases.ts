@@ -71,22 +71,22 @@ export class CasesService {
     return found(await this.db.case.findFirst({ where: { id: id(raw), orgId: ctx.orgId } }), 'Case not found');
   }
 
-  /** USDT transfers between the case's wallets (case addresses + wallets in the saved graph), with hop numbers. */
+  /** Stablecoin (USDT / USDC) transfers between the case's wallets (case addresses + wallets in the saved graph), with hop numbers. */
   async timeline(c: { id: number; graphJson: unknown }) {
     const warnings: string[] = [];
     const addrs = await this.db.caseAddress.findMany({ where: { caseId: c.id }, orderBy: { id: 'asc' } });
-    const all = [...addrs.map((a) => ({ chain: a.chain as Chain, address: a.address })), ...graphAddresses(c.graphJson).map((a) => ({ chain: parseAddr(a).chain, address: a }))];
+    const all = [...addrs.map((a) => ({ chain: a.chain as Chain, address: a.address })), ...graphAddresses(c.graphJson).map((a) => ({ chain: parseAddr(a, (c.graphJson as any)?.chain).chain, address: a }))]; // a saved graph carries its chain (eth | bsc), older ones are Ethereum
     const seen = new Set<string>();
     const wallets = all.filter((w) => !seen.has(w.chain + w.address) && seen.add(w.chain + w.address));
     if (wallets.length > MAX_TIMELINE_ADDRESSES) warnings.push(`Only the first ${MAX_TIMELINE_ADDRESSES} of ${wallets.length} wallets were checked for transfers`);
     const checked = wallets.slice(0, MAX_TIMELINE_ADDRESSES);
 
     const inCase = new Set(checked.map((w) => w.chain + norm(w.address)));
-    const rows = new Map<string, { hash: string; from: string; to: string; amount: number; timestamp: number }>();
+    const rows = new Map<string, { hash: string; from: string; to: string; amount: number; asset: string; timestamp: number }>();
     for (const w of checked) {
       try {
         for (const t of await getTransfers(w.chain, w.address, 500, false, 'case')) {
-          if (inCase.has(w.chain + norm(t.from)) && inCase.has(w.chain + norm(t.to))) rows.set(`${t.hash}|${t.from}|${t.to}|${t.amount}`, t);
+          if (inCase.has(w.chain + norm(t.from)) && inCase.has(w.chain + norm(t.to))) rows.set(`${t.asset}|${t.hash}|${t.from}|${t.to}|${t.amount}`, t);
         }
       } catch (e) {
         warnings.push(`${w.address}: ${(e as Error).message}`);
@@ -185,7 +185,7 @@ export class CasesController {
   @Post('cases/:id/addresses')
   async addAddress(@CurrentCtx() ctx: Ctx, @Param('id') raw: string, @Body() b: any) {
     const c = await this.cases.own(ctx, raw);
-    const { chain, addr } = parseAddr(b.address);
+    const { chain, addr } = parseAddr(b.address, b.chain);
     try {
       const a = await this.db.caseAddress.create({ data: { caseId: c.id, chain, address: addr, role: oneOf(b.role ?? 'other', 'role', ROLES), note: str(b.note, 'note', { optional: true, max: 2000 }) } });
       await audit(this.db, ctx, 'case.address.add', `case:${c.id}`, { address: addr, role: a.role });
@@ -355,6 +355,6 @@ export class CasesController {
     await audit(this.db, ctx, 'case.export', `case:${c.id}`, { transfers: transfers.length });
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="case-${c.id}-transfers.csv"`);
-    res.send(toCsv([['time_utc', 'hop', 'from', 'to', 'amount_usdt', 'tx_hash'], ...transfers.map((t) => [new Date(t.timestamp).toISOString(), t.hop, t.from, t.to, t.amount, t.hash])]));
+    res.send(toCsv([['time_utc', 'hop', 'from', 'to', 'asset', 'amount', 'tx_hash'], ...transfers.map((t) => [new Date(t.timestamp).toISOString(), t.hop, t.from, t.to, t.asset.toUpperCase(), t.amount, t.hash])]));
   }
 }

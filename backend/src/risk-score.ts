@@ -57,15 +57,17 @@ export function topLabel(labels: LabelLike[]): LabelLike | null {
 
 const pct = (x: number) => `${(x * 100).toFixed(x < 0.01 ? 2 : 1)}%`;
 const usd = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: 0 });
+// USDT and USDC both track the US dollar, so volume of different assets is simply added and shown as USD-equivalent.
+export const USD_NOTE = 'USDT and USDC are both ≈ 1 USD, so their volumes are added';
 
 /** Pure scoring: own labels, direct (1-hop) exposure by volume, discounted indirect (2-hop) exposure. */
-export function scoreRisk(input: { own: LabelLike[]; frozen: boolean; flows: Flow[]; labelsOf: (addr: string) => LabelLike[]; indirect?: IndirectInput[] }): RiskResult {
+export function scoreRisk(input: { own: LabelLike[]; frozen: boolean; frozenBy?: string[]; flows: Flow[]; labelsOf: (addr: string) => LabelLike[]; indirect?: IndirectInput[] }): RiskResult {
   const reasons: string[] = [];
 
   let own = 0;
   if (input.frozen) {
     own = 100;
-    reasons.push('Frozen by Tether (USDT blacklist)');
+    reasons.push(input.frozenBy?.length ? `Frozen by ${input.frozenBy.join(' and ')} (issuer blacklist)` : 'Frozen by the token issuer (blacklist)');
   }
   for (const l of input.own) {
     const w = WEIGHTS[l.category] ?? 0;
@@ -87,7 +89,7 @@ export function scoreRisk(input: { own: LabelLike[]; frozen: boolean; flows: Flo
   exposures.sort((a, b) => b.weight * b.volume - a.weight * a.volume);
   const direct = total ? weighted / total : 0;
   for (const e of exposures.filter((e) => e.weight > 0).slice(0, 5)) {
-    reasons.push(`Direct exposure: ${usd(e.volume)} USDT (${pct(e.share)} of volume) with ${e.category} wallet ${e.address} (${e.name})`);
+    reasons.push(`Direct exposure: ${usd(e.volume)} USD-equivalent (${pct(e.share)} of volume; ${USD_NOTE}) with ${e.category} wallet ${e.address} (${e.name})`);
   }
 
   let indirect = 0;

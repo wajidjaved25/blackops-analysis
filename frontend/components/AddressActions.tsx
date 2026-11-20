@@ -9,7 +9,7 @@ import { Button, Field, Input, Notice, Select, Textarea } from './ui';
 export const ROLES = ['suspect', 'victim', 'exchange', 'intermediary', 'other'];
 interface CaseRow { id: number; title: string; status: string }
 
-export function AddToCaseModal({ address, onClose }: { address: string; onClose: () => void }) {
+export function AddToCaseModal({ address, chain, onClose }: { address: string; chain?: string; onClose: () => void }) {
   const toast = useToast();
   const cases = useApi<CaseRow[]>('/cases');
   const [caseId, setCaseId] = useState('');
@@ -28,7 +28,7 @@ export function AddToCaseModal({ address, onClose }: { address: string; onClose:
         if (!title.trim()) throw new Error('Give the new case a title');
         id = String((await api<{ id: number }>('/cases', { body: { title: title.trim() } })).id);
       }
-      await api(`/cases/${id}/addresses`, { body: { address, role, note: note || undefined } });
+      await api(`/cases/${id}/addresses`, { body: { address, chain, role, note: note || undefined } }); // the case remembers the chain per address (Ethereum vs BNB Chain)
       toast.success('Address added to case');
       onClose();
     } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
@@ -53,7 +53,7 @@ export function AddToCaseModal({ address, onClose }: { address: string; onClose:
   );
 }
 
-export function WatchModal({ address, onClose }: { address: string; onClose: () => void }) {
+export function WatchModal({ address, chain, onClose }: { address: string; chain?: string; onClose: () => void }) {
   const toast = useToast();
   const lists = useApi<{ id: number; name: string }[]>('/watchlists');
   const [id, setId] = useState('');
@@ -66,7 +66,7 @@ export function WatchModal({ address, onClose }: { address: string; onClose: () 
     try {
       let wid = id;
       if (id === 'new') { if (!name.trim()) throw new Error('Name the new watchlist'); wid = String((await api<{ id: number }>('/watchlists', { body: { name: name.trim() } })).id); }
-      await api(`/watchlists/${wid}/items`, { body: { addresses: [address] } });
+      await api(`/watchlists/${wid}/items`, { body: { addresses: [address], chain } });
       toast.success('Now watching this address');
       onClose();
     } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }

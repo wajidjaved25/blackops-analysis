@@ -9,7 +9,7 @@ import { useApi } from '@/lib/hooks';
 interface Report {
   case: { id: number; title: string; description?: string; status: string; createdAt: string; graphPng?: string };
   addresses: { id: number; chain: string; address: string; role: string; note?: string; risk?: { score: number; level: string; reasons: string[] } }[];
-  timeline: { hash: string; from: string; to: string; amount: number; timestamp: number; hop: number | null }[];
+  timeline: { hash: string; from: string; to: string; amount: number; asset?: string; timestamp: number; hop: number | null }[];
   warnings?: string[];
   totals: { transfers: number; volume: number };
   generatedAt: string;
@@ -37,7 +37,7 @@ export default function ReportPage() {
             {r.warnings?.length ? <div className="no-print" style={{ background: '#fff4d6', padding: 8, fontSize: 12, marginBottom: 10 }}>Notes: {r.warnings.join(' · ')}</div> : null}
             <h2>Summary</h2>
             <p style={{ whiteSpace: 'pre-wrap' }}>{r.case.description || 'No description provided.'}</p>
-            <table><tbody><tr><th>Addresses in case</th><td>{r.addresses.length}</td><th>Transfers between them</th><td>{r.totals.transfers}</td><th>Total volume</th><td>{num(r.totals.volume)} USDT</td></tr></tbody></table>
+            <table><tbody><tr><th>Addresses in case</th><td>{r.addresses.length}</td><th>Transfers between them</th><td>{r.totals.transfers}</td><th>Total volume</th><td>{num(r.totals.volume)} USD-equivalent (USDT + USDC, both ≈ $1)</td></tr></tbody></table>
             <h2>Addresses and risk</h2>
             <table><thead><tr><th>Address</th><th>Chain</th><th>Role</th><th>Risk</th><th>Notes / reasons</th></tr></thead><tbody>
               {r.addresses.map((a) => (
@@ -48,8 +48,8 @@ export default function ReportPage() {
             {png && <><h2>Fund-flow graph</h2><img src={png} alt="Fund-flow graph" /></>}
             <h2>Key transfers</h2>
             {r.timeline.length === 0 ? <p className="muted">No transfers between the case addresses were found.</p> : (
-              <table><thead><tr><th>Time</th><th>Hop</th><th>From</th><th>To</th><th className="num">USDT</th><th>Transaction</th></tr></thead><tbody>
-                {r.timeline.map((t, i) => (<tr key={i}><td>{exact(t.timestamp)}</td><td>{t.hop ?? '–'}</td><td title={t.from} style={{ fontFamily: 'monospace' }}>{short(t.from)}</td><td title={t.to} style={{ fontFamily: 'monospace' }}>{short(t.to)}</td><td className="num">{num(t.amount)}</td><td style={{ fontFamily: 'monospace', wordBreak: 'break-all', fontSize: 10 }}>{t.hash}</td></tr>))}
+              <table><thead><tr><th>Time</th><th>Hop</th><th>From</th><th>To</th><th>Asset</th><th className="num">Amount</th><th>Transaction</th></tr></thead><tbody>
+                {r.timeline.map((t, i) => (<tr key={i}><td>{exact(t.timestamp)}</td><td>{t.hop ?? '–'}</td><td title={t.from} style={{ fontFamily: 'monospace' }}>{short(t.from)}</td><td title={t.to} style={{ fontFamily: 'monospace' }}>{short(t.to)}</td><td>{(t.asset ?? 'usdt').toUpperCase()}</td><td className="num">{num(t.amount)}</td><td style={{ fontFamily: 'monospace', wordBreak: 'break-all', fontSize: 10 }}>{t.hash}</td></tr>))}
               </tbody></table>
             )}
             <p className="muted" style={{ fontSize: 11, marginTop: 28, borderTop: '1px solid #ddd', paddingTop: 8 }}>

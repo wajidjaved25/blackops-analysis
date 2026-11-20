@@ -11,8 +11,8 @@ Base path `/api` (the frontend proxies `/api/*` to `http://localhost:4000/api/*`
   - `401` → frontend redirects to `/login?next=<path>`.
   - `403` → show "You don't have permission for this". The frontend also **hides or disables** UI for actions the user lacks permission for, using `permissions` from `/auth/me` (never rely on hiding alone — the backend enforces).
 - **Access control is permission-based (RBAC)** — see "Roles & permissions" below. Each route requires one permission; the table rows say which (`perm:`).
-- Addresses: Tron `T` + 33 base58 chars; Ethereum `0x` + 40 hex (backend stores lowercase). Chain is auto-detected — never ask the user for it.
-- Amounts are USDT numbers (6 decimals already applied). Timestamps are **milliseconds since epoch** unless the field is an ISO `createdAt`/`updatedAt`.
+- Addresses: Tron `T` + 33 base58 chars; EVM `0x` + 40 hex (backend stores lowercase). Tron is auto-detected. **A `0x` address exists on every EVM chain, so it is Ethereum by default and the caller says `chain=bsc` for BNB Chain** (see "Assets & chains" below) — the UI asks only for `0x` input.
+- Amounts are token units with the token's decimals already applied (USDT and USDC are both ≈ 1 USD, so volumes of different assets are simply added wherever a response says USD-equivalent: risk exposure, node/edge totals, balances with `asset=all`). Timestamps are **milliseconds since epoch** unless the field is an ISO `createdAt`/`updatedAt`.
 - Risk levels: `severe` (≥75) · `high` (≥40) · `medium` (≥15) · `low`. Label categories and weights: `sanctioned 100, frozen 100, ransomware 95, darknet 95, terrorism 95, scam 90, fraud 90, mixer 80, gambling 50, other 20, exchange 0, service 0`.
 - Lists are capped/paginated as noted. Slow endpoints (live chain data) take 2–15 s — the UI must show loading states.
 
@@ -27,7 +27,7 @@ Permission keys (fixed list, defined once in the backend and returned by `GET /p
 | `investigate.view` | address, tx, graph, path, risk pages |
 | `export.data` | CSV downloads, case reports |
 | `screen.run` | create bulk screening jobs (viewing results needs `investigate.view`) |
-| `labels.view` / `labels.manage` / `labels.sync` | see labels / create, delete, import / run OFAC & Tether sync, import-url |
+| `labels.view` / `labels.manage` / `labels.sync` | see labels / create, delete, import / run OFAC, Tether & Circle sync, import-url |
 | `monitor.view` / `monitor.manage` | see watchlists & rules / create & edit them |
 | `alerts.triage` | change alert status |
 | `cases.view` / `cases.manage` / `cases.delete` | see cases / create & edit (addresses, notes, files, graph) / delete cases |
@@ -88,33 +88,33 @@ Admins can create **custom roles** with any subset (cannot grant a permission th
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/address/:addr?limit=200&deep=false` | `{ chain, address, balance, frozen, totalIn, totalOut, txCount, truncated, firstSeen, lastSeen, risk: Assessment, counterparties: [{ address, in, out, inCount, outCount, label: {name, category} \| null }], transfers: [{ hash, from, to, amount, timestamp }] }`. `truncated=true` → totals cover only the latest `txCount` transfers. **Default `limit=200` (one TronGrid page, ~2 s); max 2000.** **Phase 7A additions:** `coverage: { status: 'pending'\|'backfilling'\|'complete'\|'capped'\|'error', rowCount, newestTs, lastSyncAt } \| null` (null = wallet not in our index) and `lifetime: { in, out, inCount, outCount, counterparties, firstSeen, lastSeen } \| null` — **only non-null when `coverage.status = 'complete'`**, computed in SQL over the wallet's whole history (self-transfers excluded). `totalIn/totalOut/txCount/truncated` keep their old meaning (the returned window). `risk` is the *shallow* assessment (own labels, direct exposure, freeze check; `indirect` = 0) unless `deep=true`. The UI shows this at once, then loads `GET /risk/:addr` for the 2-hop result and offers "Load more history" (`limit=1000`, ~5 pages, 10–20 s on busy wallets). Balance, transfers and the freeze check run concurrently. |
-| GET | `/address/:addr/report.csv` | CSV download (summary + all transfers) |
-| GET | `/tx/:chain/:hash` | chain `tron`\|`eth` → `{ chain, hash, block, timestamp, success, transfers: [{ from, to, amount }] }` |
-| GET | `/graph/:addr?depth=1&fanout=8&from=&to=&min=` | depth 1–3, fanout 1–15, from/to ISO date or ms, min USDT → `{ chain, nodes: [{ id, root?, expanded, in?, out?, label?, category? }], edges: [{ id, source, target, amount, count }] }`. Edge id = `source>target`. |
-| GET | `/graph/:addr?…&transfers=true` | ✅ same, plus each edge gets `transfers: [{ hash, amount, timestamp }]` (newest first, max 50 per edge) so the UI can draw one link per transfer and label it with amount/date. Nodes also get `volume` (in+out within the window) for sizing. |
-| GET | `/path?from=&to=&maxHops=4&fanout=10` | directed money path → `{ chain, found, path: string[], nodes, edges, expansions, limitReached }` |
+| GET | `/address/:addr?limit=200&deep=false&chain=&asset=all` | `{ chain, address, balance, frozen, totalIn, totalOut, txCount, truncated, firstSeen, lastSeen, risk: Assessment, counterparties: [{ address, in, out, inCount, outCount, label: {name, category} \| null }], transfers: [{ hash, from, to, amount, asset: 'usdt'\|'usdc', timestamp }] }`. **Phase 7B additions:** `chain` (`tron`\|`eth`\|`bsc`, only needed for `bsc`), `asset` (`usdt`\|`usdc`\|`all`, default `all`; 400 otherwise) and the response fields `asset` (echo), `assets: [{ asset, symbol, decimals, issuer: 'tether'\|'circle'\|null, note }]` (the registry for this chain; `note` is the Tron USDC "historical only" text), `balances: { usdt, usdc }` (always both), `balance` (USD-equivalent of the *selected* assets), `byAsset: { usdt?: { in, out, count }, usdc?: … }` (the returned window), `frozenBy: ['Tether'\|'Circle']`, `frozenAssets: { usdt, usdc }` with `true`/`false` from the issuer's on-chain blacklist or `null` = no issuer freeze exists (BSC pegged tokens — show "not applicable"). `frozen` is true when any issuer froze the wallet (live check or a `tether`/`circle` frozen label). `coverage` also carries `assets` (csv of assets whose full history is stored). `totalIn/totalOut/counterparties` add all selected assets (USD-equivalent). `truncated=true` → totals cover only the latest `txCount` transfers. **Default `limit=200` (one TronGrid page, ~2 s); max 2000.** **Phase 7A additions:** `coverage: { status: 'pending'\|'backfilling'\|'complete'\|'capped'\|'error', rowCount, newestTs, lastSyncAt } \| null` (null = wallet not in our index) and `lifetime: { in, out, inCount, outCount, counterparties, firstSeen, lastSeen } \| null` — **only non-null when `coverage.status = 'complete'`**, computed in SQL over the wallet's whole history (self-transfers excluded). `totalIn/totalOut/txCount/truncated` keep their old meaning (the returned window). `risk` is the *shallow* assessment (own labels, direct exposure, freeze check; `indirect` = 0) unless `deep=true`. The UI shows this at once, then loads `GET /risk/:addr` for the 2-hop result and offers "Load more history" (`limit=1000`, ~5 pages, 10–20 s on busy wallets). Balance, transfers and the freeze check run concurrently. |
+| GET | `/address/:addr/report.csv?chain=&asset=` | CSV download (summary + all transfers). **7B:** per-asset `balance_usdt`/`balance_usdc` rows, `frozen_by_issuer`, transfer columns `time_utc, direction, from, to, asset, amount, tx_hash` (was `amount_usdt`). |
+| GET | `/tx/:chain/:hash` | chain `tron`\|`eth`\|`bsc` → `{ chain, hash, block, timestamp, success, transfers: [{ from, to, amount, asset }] }` (USDT and USDC transfers of the registry only). A 0x hash exists on both EVM chains, so the caller picks `eth` or `bsc`. |
+| GET | `/graph/:addr?depth=1&fanout=8&from=&to=&min=&chain=&asset=all` | depth 1–3, fanout 1–15, from/to ISO date or ms, min = amount in token units → `{ chain, asset, nodes: [{ id, root?, expanded, in?, out?, label?, category? }], edges: [{ id, source, target, amount, count, asset }] }`. **7B:** one edge per (direction, asset): a USDT edge keeps the id `source>target` (old saved graphs stay valid), every other asset appends `:asset` (e.g. `source>target:usdc`). Node `in/out/volume` are USD-equivalent over the shown assets. With `asset=usdc` only USDC transfers are read and drawn. |
+| GET | `/graph/:addr?…&transfers=true` | ✅ same, plus each edge gets `transfers: [{ hash, amount, timestamp, asset }]` (newest first, max 50 per edge) so the UI can draw one link per transfer and label it with amount/date. Nodes also get `volume` (in+out within the window) for sizing. |
+| GET | `/path?from=&to=&maxHops=4&fanout=10&chain=&asset=all` | directed money path → `{ chain, found, path: string[], nodes, edges, expansions, limitReached }`; `chain` applies to both ends (400 if they are not the same chain); `edges` lists every asset's edge between consecutive hops. |
 
-`Assessment` = `{ chain, address, score, level, own, direct, indirect, reasons: string[], exposures: [{ address, name, category, weight, volume, share }], labels: [{ name, category, source, confidence }], frozen, transfersChecked }`
+`Assessment` = `{ chain, address, score, level, own, direct, indirect, reasons: string[], exposures: [{ address, name, category, weight, volume, share }], labels: [{ name, category, source, confidence }], frozen, frozenBy: string[], transfersChecked }`. **7B:** reasons add up USDT + USDC as USD-equivalent ("USDT and USDC are both ≈ 1 USD, so their volumes are added") and a freeze reads `Frozen by Tether and/or Circle (issuer blacklist)`.
 
 ## Screening & labels (Phase 2) ✅
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/risk/:addr` | `Assessment` with 2-hop indirect exposure, scored on the latest 200 transfers (same page the address summary reads, so it is a cache hit) + the top 5 unflagged counterparties' latest 200 (fetched concurrently). 5–20 s cold. |
-| POST | `/screen` | `{ name?, addresses?: string[] }` or `{ name?, csv: string }` (any cell that is an address), max 1000 → `{ id, total }`. Runs in background. |
-| GET | `/screen` | latest 50 jobs `[{ id, name, status: queued\|running\|done\|failed, progress, total, createdAt, updatedAt, error }]` |
-| GET | `/screen/:id` | `{ id, status, progress, total, error, rows: [{ chain, address, score, level, frozen, labels, reasons, error? }] }` — poll every 2–3 s while running |
-| GET | `/screen/:id/csv` | CSV download |
+| GET | `/risk/:addr?chain=&asset=all` | `Assessment` with 2-hop indirect exposure, scored on the latest 200 transfers (same page the address summary reads, so it is a cache hit) + the top 5 unflagged counterparties' latest 200 (fetched concurrently). 5–20 s cold. |
+| POST | `/screen` | `{ name?, addresses?: string[], chain?, asset? }` or `{ name?, csv: string, … }` (any cell that is an address), max 1000 → `{ id, total }`. Runs in background. `chain` (`eth` default \| `bsc`) applies to every 0x address in the request (400 if `tron`); `asset` (`usdt`\|`usdc`\|`all`) is what exposure is measured in. |
+| GET | `/screen` | latest 50 jobs `[{ id, name, asset, status: queued\|running\|done\|failed, progress, total, createdAt, updatedAt, error }]` |
+| GET | `/screen/:id` | `{ id, status, progress, total, error, asset, rows: [{ chain, address, score, level, frozen, frozenBy, labels, reasons, error? }] }` — poll every 2–3 s while running |
+| GET | `/screen/:id/csv` | CSV download; columns `address, chain, risk_score, risk_level, frozen, frozen_by, labels, reasons, error` (7B: `frozen_by_tether` → `frozen` + `frozen_by`) |
 | GET | `/labels?q=&category=&source=&page=0` | `{ rows: Label[], total, page, pageSize: 100 }` |
-| GET | `/labels/status` | `{ counts: { ofac, tether, manual, import, cluster }, ofacLastSync, tetherLastSync, etherscanKey, categories: string[] }` |
+| GET | `/labels/status` | `{ counts: { ofac, tether, circle, manual, import, cluster }, ofacLastSync, tetherLastSync, circleLastSync, etherscanKey, categories: string[] }` |
 | GET | `/labels/address/:addr` | `Label[]` for one address |
 | POST | `/labels` | `{ address, name, category }` → manual label (org-private) |
 | DELETE | `/labels/:id` | own org labels only (global OFAC/Tether → 403) |
 | POST | `/labels/import` | `{ csv, dryRun: boolean }`; CSV columns `address,name,category[,confidence]`. dryRun → `{ total, valid, errors: [{ line, address, error }], preview }`; else `{ inserted, skipped }` |
-| POST | `/labels/sync` | admin → `{ source: 'ofac' \| 'tether' }` (Tether full sync can take minutes) |
+| POST | `/labels/sync` | admin → `{ source: 'ofac' \| 'tether' \| 'circle' }` (a full Tether/Circle sync can take minutes). Circle: `Blacklisted`/`UnBlacklisted` events of the USDC contract on Tron (TronGrid) and Ethereum (Etherscan, needs the key) → labels `source=circle`, category `frozen`, name `Frozen by Circle`; also runs automatically every 30 min. |
 
-`Label` = `{ id, orgId (0 = global), chain, address, name, category, source: ofac|tether|manual|import|cluster, confidence, createdAt, updatedAt }`
+`Label` = `{ id, orgId (0 = global), chain, address, name, category, source: ofac|tether|circle|manual|import|cluster, confidence, createdAt, updatedAt }`
 
 ## Monitoring (Phase 3) ✅
 
@@ -124,12 +124,12 @@ Admins can create **custom roles** with any subset (cannot grant a permission th
 | POST | `/watchlists` | `{ name }` |
 | GET | `/watchlists/:id` | `{ id, name, items: [{ id, chain, address, note, lastSeenTs, lastCheckedAt, _count: { alerts } }], rules: Rule[] }` |
 | DELETE | `/watchlists/:id` | |
-| POST | `/watchlists/:id/items` | `{ addresses?: string[], csv?: string, note? }` → `{ added, skipped }` |
+| POST | `/watchlists/:id/items` | `{ addresses?: string[], csv?: string, note?, chain? }` → `{ added, skipped }`; `chain` (`eth` default \| `bsc`) applies to the 0x addresses |
 | DELETE | `/watch-items/:id` | |
-| POST | `/watchlists/:id/rules` | `{ type, params }`: `amount_over {amount}` · `flagged_counterparty {minWeight=50}` · `volume_spike {factor=5}` |
+| POST | `/watchlists/:id/rules` | `{ type, params }`: `amount_over {amount}` · `flagged_counterparty {minWeight=50}` · `volume_spike {factor=5}`, each with optional `asset: 'usdt'\|'usdc'\|'all'` (default `all`; rules created before 7B have none and watch every asset). Amounts are token units; a volume spike with `all` adds USDT + USDC (USD-equivalent). |
 | PATCH | `/rules/:id` | `{ enabled?, params? }` |
 | DELETE | `/rules/:id` | |
-| GET | `/alerts?status=open&watchlistId=&page=0` | `{ rows: [Alert & { rule: { type }, watchItem: { note, watchlist: { id, name } } }], total, page, pageSize: 50 }` |
+| GET | `/alerts?status=open&watchlistId=&page=0&asset=all` | `asset=usdt\|usdc` filters on `Alert.asset` (`all` = no filter; an alert from a rule that spans every asset, e.g. a volume spike, has `asset: 'all'` and only shows under All). `Alert` gains `asset: 'usdt'\|'usdc'\|'all'`; non-USDT alert `dedupKey` = `<hash>:<asset>`. `{ rows: [Alert & { rule: { type }, watchItem: { note, watchlist: { id, name } } }], total, page, pageSize: 50 }` |
 | PATCH | `/alerts/:id` | `{ status: open\|reviewing\|closed }` |
 | POST | `/monitor/run` | run one poll now → `{ checked, alerts }` (normally automatic every `MONITOR_INTERVAL_SEC`, default 120) |
 | GET/POST/DELETE | `/notify-targets` (`/:id`) | admin. POST `{ type: email\|webhook, target }` → webhook gets a generated `secret` |
@@ -148,7 +148,7 @@ Webhook: POST JSON `{ event: 'alert.created', alert }`, header `X-USDT-Trace-Sig
 | GET | `/cases/:id` | `{ id, title, description, status, createdAt, updatedAt, graphJson, graphPng, addresses: CaseAddress[], notes: [{ id, body, authorId, author, createdAt }], files: [{ id, name, size, mime, createdAt }] }` |
 | PATCH | `/cases/:id` | `{ title?, description?, status?: open\|closed }` |
 | DELETE | `/cases/:id` | admin |
-| POST | `/cases/:id/addresses` | `{ address, role: suspect\|victim\|exchange\|intermediary\|other, note? }` |
+| POST | `/cases/:id/addresses` | `{ address, chain?, role: suspect\|victim\|exchange\|intermediary\|other, note? }` — `chain` `eth` (default) \| `bsc`; the case stores the chain per address (that is how a case "remembers" Ethereum vs BNB Chain). A saved graph payload carries its `chain` for the same reason. |
 | PATCH | `/case-addresses/:id` | `{ role?, note? }` |
 | DELETE | `/case-addresses/:id` | |
 | POST | `/cases/:id/notes` | `{ body }` |
@@ -157,7 +157,7 @@ Webhook: POST JSON `{ event: 'alert.created', alert }`, header `X-USDT-Trace-Sig
 | GET | `/case-files/:id` | download |
 | DELETE | `/case-files/:id` | |
 | PUT | `/cases/:id/graph` | `{ elements: CytoscapeElementsJson, png: 'data:image/png;base64,…' }` (≤ 8 MB) |
-| GET | `/cases/:id/timeline` | `[{ hash, from, to, amount, timestamp, hop }]` — USDT transfers between the case's addresses (+ saved graph nodes), oldest first; `hop` = distance from the first victim/suspect |
+| GET | `/cases/:id/timeline` | `[{ hash, from, to, amount, asset, timestamp, hop }]` — USDT and USDC transfers between the case's addresses (+ saved graph nodes), oldest first; `hop` = distance from the first victim/suspect |
 | GET | `/cases/:id/report` | `{ case, addresses: [CaseAddress & { risk: { score, level, reasons } }], timeline, totals: { transfers, volume }, generatedAt, generatedBy }` (for the printable report page; audited) |
 | GET | `/cases/:id/transfers.csv` | timeline as CSV |
 
@@ -181,14 +181,34 @@ Global chain data (not org-scoped). All routes need `index.manage` and the mutat
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/index/status` | `{ transfers: { count, approx }, addresses: { complete?, capped?, pending?, backfilling?, error? }, tailer: [{ chain: 'tron'\|'eth', enabled, cursorTs, lagMs, rowsTotal, rowsPerMin, error, needs }], reads: { db, sync, api }, upstream: { calls, byHost, recent: [{ t, url }] }, config: { maxPerAddress, freshSec } }`. `reads` and `upstream` are counters since process start; `upstream.calls` counts real HTTP attempts to explorer APIs (cache hits and Postgres reads excluded; 429 retries included), `recent` = last 100 URLs (API keys masked). `transfers.approx` is true above 1 M rows (planner estimate). `needs: 'ETH_RPC_URL'` when the Ethereum tailer is enabled without an RPC URL. |
-| GET | `/index/addresses?q=&status=&limit=50&offset=0` | `{ total, rows: [{ id, chain, address, status, reason: 'lookup'\|'watch'\|'case'\|'manual', rowCount, oldestTs, newestTs, lastSyncAt, error, createdAt }] }`, newest first; `q` = substring of the address |
-| POST | `/index/addresses` | `{ address }` — add a wallet (reason `manual`) or re-queue a full backfill for a listed one; `409` while its backfill is running |
-| POST | `/index/addresses/:addr/sync` | incremental sync now (only transfers at/after the newest stored); `409` unless status is `complete`/`capped`; `404` if not indexed |
-| DELETE | `/index/addresses/:addr` | drops the coverage row (reads go back to the live API); stored transfers are kept; `409` while backfilling |
+| GET | `/index/addresses?q=&status=&limit=50&offset=0` | `{ total, rows: [{ id, chain, address, status, assets, retries, retryAt, reason: 'lookup'\|'watch'\|'case'\|'manual', rowCount, oldestTs, newestTs, lastSyncAt, error, createdAt }] }` (`assets` = csv of stored assets, e.g. `usdt,usdc`), newest first; `q` = substring of the address |
+| POST | `/index/addresses` | `{ address, chain? }` — add a wallet (reason `manual`) or re-queue a full backfill for a listed one; `409` while its backfill is running |
+| POST | `/index/addresses/:addr/sync?chain=` | incremental sync now (only transfers at/after the newest stored); `409` unless status is `complete`/`capped`; `404` if not indexed |
+| DELETE | `/index/addresses/:addr?chain=` | drops the coverage row (reads go back to the live API); stored transfers are kept; `409` while backfilling |
 
 **Read-through rules** (`getTransfers(chain, addr, max, fresh, reason)`): wallet `complete` (or `capped` and `max` ≤ rows held) and synced within `INDEX_FRESH_SEC` → Postgres only. Covered but stale, or `fresh` (monitoring) → fetch only newer rows (`min_timestamp` on Tron, `startblock` on Ethereum), then Postgres. Anything else (unknown, `pending`, `backfilling`, `error`) → live API as before; the page is written through and, unless the caller is a graph/risk/attribution neighbour (`reason: 'graph'`), the wallet is queued for a background backfill (`INDEX_MAX_PER_ADDRESS`, default 50 000, then `capped` = newest N kept). With `INDEX_TAIL` on and the tailer within 3 min of real time, a wallet synced after the tailer started needs no API call even when `fresh`.
 
 **Full-chain tailer** (`INDEX_TAIL=tron,eth`, off by default): Tron via TronGrid USDT `Transfer` events in 60 s windows kept 2 min behind real time (the confirmation floor), Ethereum via `ETH_RPC_URL` `eth_getLogs` (12 confirmations). Starts at "now"; older history comes from per-wallet backfills. The Ethereum paths are code-complete but not live-tested.
+
+## Assets & chains (Phase 7B, USDT + USDC on Tron / Ethereum / BNB Chain)
+
+Registry (`backend/src/assets.ts`; each contract's `symbol()` and `decimals()` were read live on 2026-11-20, see task.md 7B):
+
+| Chain | Asset | Contract | Decimals | Issuer freeze |
+|---|---|---|---|---|
+| `tron` | USDT | `TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t` | 6 | Tether `isBlackListed` |
+| `tron` | USDC | `TEkxiTehnzSmSe2XqrBj4w32RUN966rdz8` | 6 | Circle `isBlacklisted` — Circle ended Tron USDC support in 2024, so the UI marks it historical-only |
+| `eth` | USDT | `0xdac17f958d2ee523a2206206994597c13d831ec7` | 6 | Tether `isBlackListed` |
+| `eth` | USDC | `0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48` | 6 | Circle `isBlacklisted` |
+| `bsc` | USDT | `0x55d398326f99059ff775485246999027b3197955` | 18 | none (bridge-issued) → "not applicable" |
+| `bsc` | USDC | `0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d` | 18 | none → "not applicable" |
+
+- **`asset` parameter** (`usdt`\|`usdc`\|`all`, default `all`) on address, report.csv, graph, path, risk, `/v1/screen`; request body field on `POST /screen`; rule param on monitoring rules; alert filter. An unknown value is `400`. `Transfer.asset` is stored per row.
+- **`chain` parameter** (`tron`\|`eth`\|`bsc`) on the same endpoints, in the body of `POST /screen`, `/watchlists/:id/items`, `/cases/:id/addresses`, `/index/addresses`. Omitted = autodetect (`T…` → Tron, `0x…` → **Ethereum**), so every URL that worked before still works. A chain that cannot own the address shape (`chain=tron` with a 0x address, `chain=bsc` with a T address) is `400`.
+- **Labels on BNB Chain:** labels are stored per chain (`tron`, `eth`, `bsc`). A BNB Chain lookup also sees the Ethereum-keyed OFAC / manual / import / cluster labels (the same 0x key), but never the Tether / Circle freeze labels, which are specific to the Ethereum contracts.
+- **Index coverage** stays per `(chain, address)` and covers *all* assets of that chain: `IndexedAddress.assets` lists what is stored. When the registry gains an asset, `complete` wallets are re-queued at boot and fetch only the missing asset (capped wallets are left alone: their reads of the new asset stay live). A read is served from Postgres only for assets the coverage stores. The full-chain tailer follows USDT only; USDC (and all of BNB Chain) enter through per-wallet backfills.
+- **Failed backfills** (typically TronGrid 429) retry automatically after 1, 2, 4, 8, 16 min (`retries`, `retryAt`), then stay `error` until re-queued by hand (`POST /index/addresses`).
+- **Ethereum and BNB Chain need `ETHERSCAN_API_KEY`** (Etherscan v2, `chainid=1` / `56`); without it they return `400` saying so. The BNB Chain paths are code-complete and unit-checked but not live-tested; Etherscan's free tier may not include BNB Chain (check your plan).
 
 ---
 

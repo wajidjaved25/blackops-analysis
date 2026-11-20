@@ -1,14 +1,25 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { lookup } from 'node:dns/promises';
 import { isIPv4, isIPv6 } from 'node:net';
+import { AssetFilter, CHAINS } from './assets';
 import { Chain, detectChain, norm } from './chains';
 
-export function parseAddr(raw: unknown): { chain: Chain; addr: string } {
+/**
+ * Address + optional explicit chain. A 0x address exists on every EVM chain, so it defaults to Ethereum and the caller
+ * says `bsc` to mean BNB Chain; a chain that cannot own the address shape is a 400.
+ */
+export function parseAddr(raw: unknown, hint?: unknown): { chain: Chain; addr: string } {
   const v = typeof raw === 'string' ? raw.trim() : '';
-  const chain = detectChain(v);
-  if (!chain) throw new BadRequestException(`Not a valid Tron (T…) or Ethereum (0x…) address: "${String(raw ?? '').slice(0, 80)}"`);
+  const detected = detectChain(v);
+  if (!detected) throw new BadRequestException(`Not a valid Tron (T…) or Ethereum / BNB Chain (0x…) address: "${String(raw ?? '').slice(0, 80)}"`);
+  if (hint === undefined || hint === null || hint === '') return { chain: detected, addr: norm(v) };
+  const chain = oneOf(hint, 'chain', CHAINS);
+  if ((chain === 'tron') !== (detected === 'tron')) throw new BadRequestException(`"${v.slice(0, 80)}" is not a ${chain} address`);
   return { chain, addr: norm(v) };
 }
+
+/** `?asset=usdt|usdc|all`, default all. */
+export const assetParam = (raw: unknown): AssetFilter => oneOf(raw === undefined || raw === '' ? 'all' : raw, 'asset', ['all', 'usdt', 'usdc'] as const);
 
 export function int(raw: unknown, def: number, min: number, max: number): number {
   if (raw === undefined || raw === null || raw === '') return def;
@@ -76,7 +87,7 @@ export function toCsv(rows: (string | number | boolean | null | undefined)[][]):
 }
 
 /** Pull addresses out of a JSON list or free text / CSV (first column, or any cell that looks like an address). */
-export function extractAddresses(input: { addresses?: unknown; csv?: unknown }, max: number): { chain: Chain; addr: string }[] {
+export function extractAddresses(input: { addresses?: unknown; csv?: unknown; chain?: unknown }, max: number): { chain: Chain; addr: string }[] {
   const raw: string[] = Array.isArray(input.addresses)
     ? input.addresses.map(String)
     : typeof input.csv === 'string'
@@ -85,7 +96,7 @@ export function extractAddresses(input: { addresses?: unknown; csv?: unknown }, 
   const seen = new Set<string>();
   const out: { chain: Chain; addr: string }[] = [];
   for (const r of raw) {
-    const a = parseAddr(r);
+    const a = parseAddr(r, detectChain(r.trim()) === 'tron' ? undefined : input.chain); // body-level `chain` applies to the 0x addresses only
     const k = a.chain + a.addr;
     if (!seen.has(k)) seen.add(k), out.push(a);
   }

@@ -1,5 +1,6 @@
 import { BadRequestException, Body, Controller, Delete, ForbiddenException, Get, Injectable, Logger, OnModuleInit, Param, Post, Query } from '@nestjs/common';
 import { Label } from '@prisma/client';
+import { issuerName } from './assets';
 import { CurrentCtx, Perm } from './auth';
 import { Chain, detectChain, ethFreezeEvents, hasEtherscanKey, norm, tronFreezeEvents } from './chains';
 import { audit, Ctx, Db } from './db';
@@ -23,20 +24,23 @@ export class LabelsService implements OnModuleInit {
   ) {}
 
   onModuleInit() {
-    // Daily OFAC refresh, Tether freeze sync every 30 minutes. Both are cheap no-ops when up to date.
+    // Daily OFAC refresh, Tether and Circle freeze syncs every 30 minutes. All are cheap no-ops when up to date.
     this.jobs.every('ofac-sync', 60 * 60_000, async () => {
       const last = Number((await this.getSetting('ofac.lastSync')) ?? 0);
       if (Date.now() - last > DAY) await this.syncOfac();
     });
     this.jobs.every('tether-sync', 30 * 60_000, () => this.syncTether(), 15_000);
+    this.jobs.every('circle-sync', 30 * 60_000, () => this.syncCircle(), 45_000);
   }
 
   /** Labels for many addresses on one chain, visible to the org (global + its own). */
   async lookup(chain: Chain, addresses: string[], orgId: number): Promise<Map<string, LabelLite[]>> {
     const m = new Map<string, LabelLite[]>();
     if (!addresses.length) return m;
+    // BNB Chain shares 0x addresses with Ethereum: sanctions and user labels carry over, issuer freezes (Tether/Circle on Ethereum) do not.
+    const chainWhere = chain === 'bsc' ? { OR: [{ chain: 'bsc' }, { chain: 'eth', source: { notIn: ['tether', 'circle'] } }] } : { chain };
     const rows = await this.db.label.findMany({
-      where: { chain, address: { in: [...new Set(addresses.map(norm))] }, orgId: { in: [0, orgId] } },
+      where: { ...chainWhere, address: { in: [...new Set(addresses.map(norm))] }, orgId: { in: [0, orgId] } },
       select: { address: true, name: true, category: true, source: true, confidence: true },
     });
     for (const r of rows) m.set(r.address, [...(m.get(r.address) ?? []), r]);
@@ -71,48 +75,55 @@ export class LabelsService implements OnModuleInit {
     return { addresses: found.size, removed: removed.count };
   }
 
-  private async applyFreeze(chain: Chain, events: { address: string; added: boolean }[]) {
+  private async applyFreeze(issuer: 'tether' | 'circle', chain: Chain, events: { address: string; added: boolean }[]) {
     for (const e of events) {
-      const where = { chain_address_source_orgId: { chain, address: e.address, source: 'tether', orgId: 0 } };
+      const where = { chain_address_source_orgId: { chain, address: e.address, source: issuer, orgId: 0 } };
       if (e.added) {
-        await this.db.label.upsert({ where, create: { chain, address: e.address, name: 'Frozen by Tether', category: 'frozen', source: 'tether', orgId: 0 }, update: {} });
+        await this.db.label.upsert({ where, create: { chain, address: e.address, name: `Frozen by ${issuerName[issuer]}`, category: 'frozen', source: issuer, orgId: 0 }, update: {} });
       } else {
-        await this.db.label.deleteMany({ where: { chain, address: e.address, source: 'tether', orgId: 0 } });
+        await this.db.label.deleteMany({ where: { chain, address: e.address, source: issuer, orgId: 0 } });
       }
     }
   }
 
-  private tetherRun: Promise<unknown> | null = null;
+  private runs: Partial<Record<'tether' | 'circle', Promise<unknown>>> = {};
 
   /** Imports Tether's freeze/unfreeze events since the last cursor. Safe to re-run; concurrent calls share one run. */
   syncTether() {
-    this.tetherRun ??= this.doSyncTether().finally(() => (this.tetherRun = null));
-    return this.tetherRun;
+    return this.syncIssuer('tether');
+  }
+  /** Same for Circle's USDC blacklist (Blacklisted / UnBlacklisted events). */
+  syncCircle() {
+    return this.syncIssuer('circle');
+  }
+  private syncIssuer(issuer: 'tether' | 'circle') {
+    this.runs[issuer] ??= this.doSyncIssuer(issuer).finally(() => delete this.runs[issuer]);
+    return this.runs[issuer];
   }
 
-  private async doSyncTether() {
+  private async doSyncIssuer(issuer: 'tether' | 'circle') {
     const out = { tron: 0, eth: 0 as number | string };
     // Tron: everything since the cursor (events at the cursor itself are re-applied; that is idempotent).
-    const cursor = Number((await this.getSetting('tether.tron.ts')) ?? 0);
-    const tronEvents = await tronFreezeEvents(cursor);
-    await this.applyFreeze('tron', tronEvents);
+    const cursor = Number((await this.getSetting(`${issuer}.tron.ts`)) ?? 0);
+    const tronEvents = await tronFreezeEvents(issuer, cursor);
+    await this.applyFreeze(issuer, 'tron', tronEvents);
     out.tron = tronEvents.length;
-    if (tronEvents.length) await this.setSetting('tether.tron.ts', String(tronEvents[tronEvents.length - 1].ts));
+    if (tronEvents.length) await this.setSetting(`${issuer}.tron.ts`, String(tronEvents[tronEvents.length - 1].ts));
     // Ethereum: needs an Etherscan key.
     if (hasEtherscanKey()) {
-      let from = Number((await this.getSetting('tether.eth.block')) ?? 0);
+      let from = Number((await this.getSetting(`${issuer}.eth.block`)) ?? 0);
       out.eth = 0;
       for (let page = 0; page < 50; page++) {
-        const r = await ethFreezeEvents(from);
-        await this.applyFreeze('eth', r.events);
+        const r = await ethFreezeEvents(issuer, from);
+        await this.applyFreeze(issuer, 'eth', r.events);
         out.eth += r.events.length;
         if (r.events.length) from = r.events[r.events.length - 1].ts; // same block re-read next time is harmless
-        await this.setSetting('tether.eth.block', String(from));
+        await this.setSetting(`${issuer}.eth.block`, String(from));
         if (!r.full) break;
       }
     } else out.eth = 'skipped (no ETHERSCAN_API_KEY)';
-    await this.setSetting('tether.lastSync', String(Date.now()));
-    this.log.log(`Tether sync: tron +${out.tron} events, eth ${out.eth}`);
+    await this.setSetting(`${issuer}.lastSync`, String(Date.now()));
+    this.log.log(`${issuerName[issuer]} sync: tron +${out.tron} events, eth ${out.eth}`);
     return out;
   }
 
@@ -197,6 +208,7 @@ export class LabelsController {
       counts: Object.fromEntries(bySource.map((r) => [r.source, r._count])),
       ofacLastSync: await s('ofac.lastSync'),
       tetherLastSync: await s('tether.lastSync'),
+      circleLastSync: await s('circle.lastSync'),
       etherscanKey: hasEtherscanKey(),
       categories: CATEGORIES,
     };
@@ -267,9 +279,9 @@ export class LabelsController {
   @Perm('labels.sync')
   @Post('sync')
   async sync(@Body() b: any) {
-    const which = oneOf(b.source, 'source', ['ofac', 'tether'] as const);
+    const which = oneOf(b.source, 'source', ['ofac', 'tether', 'circle'] as const);
     try {
-      return which === 'ofac' ? await this.labels.syncOfac() : await this.labels.syncTether();
+      return which === 'ofac' ? await this.labels.syncOfac() : which === 'tether' ? await this.labels.syncTether() : await this.labels.syncCircle();
     } catch (e) {
       throw new BadRequestException(`Sync failed: ${(e as Error).message}`);
     }

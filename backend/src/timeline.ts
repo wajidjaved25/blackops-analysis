@@ -5,6 +5,7 @@ export interface TimelineTransfer {
   from: string;
   to: string;
   amount: number;
+  asset: string;
   timestamp: number;
 }
 

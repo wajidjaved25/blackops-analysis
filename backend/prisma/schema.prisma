@@ -98,11 +98,11 @@ model AuditLog {
 model Label {
   id         Int      @id @default(autoincrement())
   orgId      Int      @default(0)
-  chain      String // tron | eth
+  chain      String // tron | eth | bsc
   address    String // eth lowercase, tron base58
   name       String
   category   String
-  source     String // ofac | tether | manual | import | cluster
+  source     String // ofac | tether | circle | manual | import | cluster
   confidence Float    @default(1)
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
@@ -180,6 +180,7 @@ model Alert {
   rule         Rule      @relation(fields: [ruleId], references: [id], onDelete: Cascade)
   dedupKey     String // tx hash, or spike:<hour bucket>
   chain        String
+  asset        String    @default("usdt") // usdt | usdc
   address      String
   counterparty String?
   amount       Float?
@@ -276,8 +277,8 @@ model ClusterSuggestion {
 
 model Transfer {
   id     BigInt  @id @default(autoincrement())
-  chain  String // tron | eth
-  asset  String  @default("usdt")
+  chain  String // tron | eth | bsc
+  asset  String  @default("usdt") // usdt | usdc
   hash   String
   seq    Int     @default(0)
   from   String
@@ -299,6 +300,9 @@ model IndexedAddress {
   address    String
   status     String    @default("pending")
   reason     String    @default("lookup") // lookup | watch | case | manual
+  assets     String    @default("") // csv of assets whose full history is stored (a new asset in the registry re-queues the wallet)
+  retries    Int       @default(0) // automatic retries after a failed backfill (bounded, with back-off)
+  retryAt    DateTime? // earliest time the next automatic retry may start
   rowCount   Int       @default(0)
   oldestTs   BigInt?
   newestTs   BigInt?
