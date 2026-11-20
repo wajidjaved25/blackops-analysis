@@ -5,6 +5,7 @@ import { RequirePerm } from '@/components/Guard';
 import { Button, ErrorState, LinkButton, SkeletonRows } from '@/components/ui';
 import { exact, num, short } from '@/lib/format';
 import { useApi } from '@/lib/hooks';
+import { OFF_CHAIN_NOTE, STATUS, TxList } from '@/components/CaseTransactions';
 
 interface Report {
   case: { id: number; title: string; description?: string; status: string; createdAt: string; graphPng?: string };
@@ -20,6 +21,7 @@ export default function ReportPage() {
   const { id } = useParams<{ id: string }>();
   const { data: r, loading, error, status, reload } = useApi<Report>(`/cases/${id}/report`);
   const c = useApi<{ graphPng?: string }>(`/cases/${id}`);
+  const txs = useApi<TxList>(`/cases/${id}/transactions?limit=1000`);
   const png = r?.case.graphPng || c.data?.graphPng;
   return (
     <RequirePerm perm="export.data">
@@ -46,6 +48,22 @@ export default function ReportPage() {
               ))}
             </tbody></table>
             {png && <><h2>Fund-flow graph</h2><img src={png} alt="Fund-flow graph" /></>}
+            {txs.data && txs.data.summary.total > 0 && (
+              <>
+                <h2>Transactions (statement and pasted hashes)</h2>
+                <table><tbody><tr><th>Rows</th><td>{txs.data.summary.total}</td><th>Claimed</th><td>{num(txs.data.summary.claimed)} USD-equivalent</td><th>Verified on-chain</th><td>{num(txs.data.summary.verified)} USD-equivalent</td></tr>
+                  <tr><th colSpan={2}>By status</th><td colSpan={4}>{Object.entries(txs.data.summary.byStatus).map(([k, v]) => `${STATUS[k]?.label ?? k}: ${v.count}`).join(' · ')}</td></tr></tbody></table>
+                <table><thead><tr><th>Status</th><th>Time</th><th>Transaction</th><th>To (claimed)</th><th className="num">Claimed</th><th className="num">On-chain</th><th>Details</th></tr></thead><tbody>
+                  {txs.data.rows.map((t) => (
+                    <tr key={t.id}><td>{STATUS[t.status]?.label ?? t.status}</td><td>{exact(t.claimedAt ?? t.onAt)}</td>
+                      <td style={{ fontFamily: 'monospace', wordBreak: 'break-all', fontSize: 10 }}>{t.hash ?? t.ref ?? '—'}</td><td title={t.address ?? ''} style={{ fontFamily: 'monospace' }}>{t.address ? short(t.address) : '—'}</td>
+                      <td className="num">{t.amount === null ? '—' : `${num(t.amount)} ${(t.coin ?? '').toUpperCase()}`}</td><td className="num">{t.onAmount === null ? '—' : `${num(t.onAmount)} ${(t.onAsset ?? '').toUpperCase()}`}</td>
+                      <td>{t.status === 'off_chain' ? OFF_CHAIN_NOTE : t.reasons.join('; ')}</td></tr>
+                  ))}
+                </tbody></table>
+                {txs.data.count > txs.data.rows.length && <p className="muted">Showing the first {txs.data.rows.length} of {txs.data.count} rows; the full list is in the CSV export.</p>}
+              </>
+            )}
             <h2>Key transfers</h2>
             {r.timeline.length === 0 ? <p className="muted">No transfers between the case addresses were found.</p> : (
               <table><thead><tr><th>Time</th><th>Hop</th><th>From</th><th>To</th><th>Asset</th><th className="num">Amount</th><th>Transaction</th></tr></thead><tbody>

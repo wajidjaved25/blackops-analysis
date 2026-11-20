@@ -13,6 +13,12 @@ import { evaluateRules, ruleParams } from './monitor-rules';
 import { ALL_PERMS, hasAny, missing, PERMISSIONS, SYSTEM_ROLES } from './permissions';
 import { graphAddresses, pickSources, timelineHops } from './timeline';
 import { base32, newRecoveryCodes, openSecret, recoveryHash, sealSecret, totp, unbase32, verifyTotp } from './totp';
+import { detectFormat, headerTz, matchTx, networkChain, normalizeRows, parseTime, tzMinutes } from './statements';
+import { readGrid } from './case-tx';
+import ExcelJS from 'exceljs';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { assetParam, parseAddr, parseCsv, privateIp, toCsv } from './util';
 
 async function main() {
@@ -345,6 +351,57 @@ async function main() {
   selfCheckSwap(assert);
   selfCheckHops(assert);
   assert.equal(rankHops({ chain: 'tron', amount: 10, asset: 'usdt', ts: 0, bridgeName: 'a' }, []).length, 0);
+
+  // --- statement import (synthetic rows, shaped like a Binance withdrawal export) ---
+  const H = ['Time (UTC+5)', 'Coin', 'Network', 'Amount', 'Fee', 'Address', 'TXID', 'Status', null];
+  const D = detectFormat(H);
+  assert.deepEqual([D.format, D.tz, D.mapping.hash, D.mapping.fee], ['binance_withdrawal', 300, 6, 4]);
+  assert.equal(detectFormat(['Date(UTC)', 'Coin', 'Network', 'Amount', 'Address', 'TXID', 'SourceAddress', 'Status']).format, 'binance_deposit');
+  assert.deepEqual([detectFormat(['Date(UTC)', 'Coin', 'Network', 'Amount', 'Address', 'TXID']).tz, detectFormat(['foo', 'bar']).format], [0, 'generic']);
+  assert.deepEqual([tzMinutes('UTC+5'), tzMinutes('UTC-3:30'), tzMinutes('+05:30'), tzMinutes('abc'), headerTz('Time (UTC+8)')], [300, -210, 330, null, 480]);
+  assert.equal(parseTime('2026-01-05 13:45:10', 300)!.toISOString(), '2026-01-05T08:45:10.000Z'); // UTC+5 wall clock -> UTC
+  assert.equal(parseTime('2026-02-31 10:00:00', 0), null);
+  assert.deepEqual(['TRX', 'trc20', 'ERC20', 'BEP20', 'BSC', 'BTC'].map(networkChain), ['tron', 'tron', 'eth', 'bsc', 'bsc', null]);
+  const T1 = 'a'.repeat(64);
+  const W1 = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t';
+  const rows = normalizeRows(
+    [H, ['2026-01-05 13:45:10', 'USDT', 'TRX', 498.5, 1.5, W1, T1, 'Completed', 'P'], ['2026-01-05 14:00:00', 'USDT', 'TRX', 10, 1, W1, 'Off-chain transfer 123456', 'Completed'], [], ['bad', 'USDT', 'TRX', 'x', 1, 'nope', 'zz', 'Completed'], ['2026-01-05 15:00:00', 'USDT', 'BTC', 1, 1, W1, T1, 'Completed'], ['2026-01-05 16:00:00', 'USDT', 'TRX', 5, 1, W1, T1, 'Completed']],
+    D.mapping,
+    { tz: D.tz! },
+  );
+  assert.deepEqual(rows.map((r) => [r.row, r.offChain, r.problems.length > 0]), [[2, false, false], [3, true, false], [5, false, true], [6, false, true], [7, false, true]]); // blank row skipped, row numbers match the sheet
+  assert.deepEqual([rows[0].chain, rows[0].hash, rows[0].claimedAt!.toISOString(), rows[1].ref, rows[1].hash, rows[1].chain], ['tron', T1, '2026-01-05T08:45:10.000Z', 'Off-chain transfer 123456', null, null]);
+  assert.ok(rows[4].problems[0].includes('row 2')); // same hash twice
+  // matching: Amount is net, Fee separate, tolerance 1e-6, several transfers in one tx
+  const W2 = 'TKHuVq1oKVruCGLvqVexFs6dawKv6fQgFs';
+  const tx = { success: true, timestamp: Date.parse('2026-01-05T08:50:00Z'), transfers: [{ from: W2, to: W1, amount: 498.5, asset: 'usdt' as const }, { from: W2, to: 'TXyz'.padEnd(34, 'x'), amount: 1.5, asset: 'usdt' as const }] };
+  const claim = { address: W1, amount: 498.5, fee: 1.5, asset: 'usdt' as const, claimedAt: new Date('2026-01-05T08:45:10Z') };
+  assert.deepEqual([matchTx(claim, tx).status, matchTx(claim, tx).onAmount], ['verified', 498.5]); // matched the transfer to the claimed address, not the fee leg
+  assert.equal(matchTx({ ...claim, amount: 498.5000009 }, tx).status, 'verified'); // within 1e-6
+  const gross = matchTx({ ...claim, amount: 497, fee: 1.5 }, tx);
+  assert.ok(gross.status === 'mismatch' && gross.reasons[0].startsWith('Amount differs'));
+  assert.ok(matchTx({ ...claim, amount: 500 }, { ...tx, transfers: [{ ...tx.transfers[0], amount: 501.5 }] }).reasons[0].includes('plus Fee'));
+  assert.ok(matchTx({ ...claim, address: W2 }, tx).reasons[0].startsWith('No transfer to the claimed address'));
+  assert.ok(matchTx(claim, { ...tx, timestamp: tx.timestamp + 3 * 3600000 }).reasons[0].startsWith('Time differs by'));
+  assert.equal(matchTx(claim, { ...tx, timestamp: tx.timestamp + 3 * 3600000 }, 240).status, 'verified'); // tolerance is configurable
+  assert.ok(matchTx({ ...claim, asset: 'usdc' }, tx).reasons[0].startsWith('Coin differs'));
+  assert.equal(matchTx(claim, { ...tx, success: false }).status, 'mismatch');
+  assert.equal(matchTx({}, tx).status, 'verified'); // pasted hash: nothing claimed, nothing to contradict
+  // real xlsx round trip: formula cells are reduced to values, extra sheets are ignored
+  const dir = mkdtempSync(join(tmpdir(), 'stmt-'));
+  try {
+    const wb = new ExcelJS.Workbook();
+    wb.addWorksheet('Summary').addRow(['Total', 1]);
+    const ws = wb.addWorksheet('Withdrawals');
+    ws.addRows([H, ['2026-01-05 13:45:10', 'USDT', 'TRX', 498.5, 1.5, W1, T1, 'Completed']]);
+    ws.addRow(['2026-01-05 13:45:10', 'USDT', 'TRX', { formula: '1+1', result: 2 }, 1, W1, { formula: 'HYPERLINK("http://x","y")', result: 'a'.repeat(64) }, 'Completed']);
+    const f = join(dir, 's.xlsx');
+    await wb.xlsx.writeFile(f);
+    const g = await readGrid(f, 's.xlsx');
+    assert.deepEqual([g.sheet, g.grid.length, g.grid[2][3], g.grid[2][6]], ['Withdrawals', 3, 2, 'a'.repeat(64)]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 
   // --- SSRF guard ---
   assert.ok(['127.0.0.1', '10.1.2.3', '172.16.0.1', '192.168.1.1', '169.254.169.254', '::1', 'fd00::1', '::ffff:10.0.0.1'].every(privateIp));

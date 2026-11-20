@@ -220,6 +220,7 @@ model Case {
   addresses   CaseAddress[]
   notes       CaseNote[]
   files       CaseFile[]
+  txs         CaseTransaction[]
 }
 
 model CaseAddress {
@@ -253,6 +254,40 @@ model CaseFile {
   mime         String
   uploadedById Int?
   createdAt    DateTime @default(now())
+  txs          CaseTransaction[]
+}
+
+/// A transaction attached to a case: pasted by hash or imported from an exchange statement (claimed*), then verified against the chain (on*).
+model CaseTransaction {
+  id         Int       @id @default(autoincrement())
+  caseId     Int
+  case       Case      @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  chain      String? // tron | eth | bsc; null when the statement's network is unknown
+  hash       String? // null for off-chain (exchange-internal) rows
+  source     String    @default("manual") // manual | import
+  fileId     Int? // the stored statement
+  file       CaseFile? @relation(fields: [fileId], references: [id], onDelete: SetNull)
+  rowNo      Int? // spreadsheet row
+  claimedAt  DateTime? // statement time, converted to UTC
+  coin       String?
+  network    String?
+  amount     Float? // net amount received, as claimed
+  fee        Float?
+  address    String? // claimed destination
+  ref        String? // exchange reference for off-chain rows
+  raw        Json? // original row, values only
+  status     String    @default("pending") // pending | verified | mismatch | not_found | off_chain | error
+  onFrom     String?
+  onTo       String?
+  onAmount   Float?
+  onAsset    String?
+  onAt       DateTime?
+  reasons    Json      @default("[]") // string[]: why it is a mismatch / error
+  verifiedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@unique([caseId, chain, hash])
+  @@index([caseId, status])
 }
 
 // ---------- Attribution (Phase 5) ----------

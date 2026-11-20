@@ -9,3 +9,8 @@ backups/
 
 *.log
 deploy.env
+
+# Case evidence / exchange exports - never commit (personal financial data)
+*.xlsx
+*.xls
+/evidence/

@@ -13,15 +13,15 @@ import { RiskService } from './risk';
 import { graphAddresses, pickSources, timelineHops } from './timeline';
 import { found, id, oneOf, parseAddr, str, toCsv } from './util';
 
-const ROLES = ['suspect', 'victim', 'exchange', 'intermediary', 'other'] as const;
+export const ROLES = ['suspect', 'victim', 'exchange', 'intermediary', 'other'] as const;
 const STATUSES = ['open', 'closed'] as const;
 const MAX_FILE = 20 * 1024 * 1024;
 const MAX_PNG = 8 * 1024 * 1024;
 const MAX_TIMELINE_ADDRESSES = 25; // each address is a live chain-API call
-const UPLOAD_DIR = resolve(process.env.UPLOAD_DIR || 'uploads');
+export const UPLOAD_DIR = resolve(process.env.UPLOAD_DIR || 'uploads');
 
 /** Allowed upload types. The stored mime comes from here, never from the client; magic bytes catch renamed files. */
-const FILE_TYPES: Record<string, { mime: string; magic?: number[] }> = {
+export const FILE_TYPES: Record<string, { mime: string; magic?: number[] }> = {
   pdf: { mime: 'application/pdf', magic: [0x25, 0x50, 0x44, 0x46] },
   png: { mime: 'image/png', magic: [0x89, 0x50, 0x4e, 0x47] },
   jpg: { mime: 'image/jpeg', magic: [0xff, 0xd8, 0xff] },
@@ -35,15 +35,15 @@ const FILE_TYPES: Record<string, { mime: string; magic?: number[] }> = {
   json: { mime: 'application/json' },
   md: { mime: 'text/markdown' },
 };
-const ext = (name: string) => name.split('.').pop()?.toLowerCase() ?? '';
+export const ext = (name: string) => name.split('.').pop()?.toLowerCase() ?? '';
 
 /** Strips path parts and control characters from a client-supplied file name. */
-function cleanName(raw: string): string {
+export function cleanName(raw: string): string {
   const utf8 = Buffer.from(raw, 'latin1').toString('utf8'); // multer decodes names as latin1
   return (utf8.split(/[\\/]/).pop() ?? '').replace(/[\x00-\x1f\x7f"]/g, '').trim().slice(0, 200) || 'file';
 }
 
-function startsWith(path: string, magic: number[]): boolean {
+export function startsWith(path: string, magic: number[]): boolean {
   const fd = openSync(path, 'r');
   try {
     const buf = Buffer.alloc(magic.length);
@@ -53,7 +53,7 @@ function startsWith(path: string, magic: number[]): boolean {
     closeSync(fd);
   }
 }
-const rm = (path: string) => {
+export const rm = (path: string) => {
   try {
     unlinkSync(path);
   } catch {

@@ -3,6 +3,7 @@ import { APP_GUARD } from '@nestjs/core';
 import { ApiKeysController, AuditController, OrgController, RolesController, UsersController } from './admin';
 import { AttributionController, ClusterWorker } from './attribution';
 import { AuthController, AuthGuard, RoleSeeder } from './auth';
+import { CaseTxController } from './case-tx';
 import { CasesController, CasesService } from './cases';
 import { Db } from './db';
 import { InvestigateController } from './investigate.controller';
@@ -15,7 +16,7 @@ import { IndexController, TransferIndex } from './transfer-index';
 import { ScreenController, ScreenWorker } from './screen';
 
 @Module({
-  controllers: [AuthController, UsersController, RolesController, OrgController, ApiKeysController, AuditController, InvestigateController, LabelsController, RiskController, ScreenController, MonitorController, CasesController, AttributionController, IndexController, CrossChainController],
+  controllers: [AuthController, UsersController, RolesController, OrgController, ApiKeysController, AuditController, InvestigateController, LabelsController, RiskController, ScreenController, MonitorController, CasesController, CaseTxController, AttributionController, IndexController, CrossChainController],
   providers: [Db, Jobs, LabelsService, RiskService, ScreenWorker, MonitorService, Notifier, RoleSeeder, CasesService, ClusterWorker, TransferIndex, { provide: APP_GUARD, useClass: AuthGuard }],
 })
 export class AppModule {}
