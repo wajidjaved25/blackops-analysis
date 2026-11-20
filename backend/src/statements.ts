@@ -73,6 +73,27 @@ export function detectFormat(headers: Cell[]): { format: Format; mapping: Mappin
   return { format: binance ? (mapping.fee !== undefined ? 'binance_withdrawal' : 'binance_deposit') : 'generic', mapping, tz };
 }
 
+/** The exchange a statement format proves (only Binance exports are auto-detected today). */
+export const exchangeOfFormat = (f: Format): string | null => (f === 'binance_withdrawal' || f === 'binance_deposit' ? 'Binance' : null);
+
+/**
+ * "Off-chain transfer" rows: the exchange moved funds internally, which it does only between its own accounts, so the
+ * destination address is one of its deposit addresses. Returns each distinct valid address once (chain from the Network column, else the address format).
+ */
+export function offChainDepositAddresses(rows: NormRow[]): { chain: Chain; address: string }[] {
+  const out = new Map<string, { chain: Chain; address: string }>();
+  for (const r of rows) {
+    if (!r.offChain || !r.address || r.problems.length) continue;
+    const d = detectChain(r.address);
+    const n = r.network ? networkChain(r.network) : null;
+    const chain = n ?? d;
+    if (!d || !chain || (chain === 'tron') !== (d === 'tron')) continue;
+    const address = norm(r.address);
+    out.set(chain + address, { chain, address });
+  }
+  return [...out.values()];
+}
+
 export interface NormRow {
   row: number; // spreadsheet row number
   chain: Chain | null;

@@ -112,7 +112,7 @@ function LinkChart({ chart }: { chart: Result['chart'] }) {
       }),
       ...chart.edges.map((e) => ({ group: 'edges' as const, data: { id: e.id, source: e.source, target: e.target, color: '#888', w: 1.5 + Math.min(5, Math.log10(1 + e.amount)), label: `${compact(e.amount)}${e.count > 1 ? ` · ${e.count}×` : ''}` } })),
     ];
-    const c = cytoscape({ container: box.current, elements: els, style: buildStyle(readTheme()), minZoom: .1, maxZoom: 3, wheelSensitivity: .3, layout: { name: 'breadthfirst', directed: true, roots: '#statement', spacingFactor: 1.15, padding: 20 } });
+    const c = cytoscape({ container: box.current, elements: els, style: buildStyle(readTheme()), minZoom: .1, maxZoom: 3, wheelSensitivity: .3, layout: { name: 'breadthfirst', directed: true, roots: '#statement', spacingFactor: 1.15, padding: 20 } as cytoscape.LayoutOptions });
     c.on('select', 'node', (e) => setSel(`${e.target.data('label').replace(/\n/g, ' · ')}${e.target.data('address') ? ` (${e.target.data('address')})` : ''}`));
     c.on('unselect', () => setSel(''));
     cy.current = c;

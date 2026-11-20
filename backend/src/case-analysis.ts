@@ -4,13 +4,14 @@ import { CaseAnalysis } from '@prisma/client';
 import { CurrentCtx, Perm } from './auth';
 import { CasesService } from './cases';
 import { Chain, getBalances, getTransfers } from './chains';
+import { BinancePor } from './binance-por';
 import { audit, Ctx, Db } from './db';
 import { Jobs } from './jobs';
 import { LabelsService } from './labels';
 import { RiskService } from './risk';
 import {
   bySeverity, busyFindings, consolidations, DEFAULT_PARAMS, exchangeFindings, exposureFindings, Finding, internalTransfers, LIMITS, linkChart, MAX_SEEDS, nearThreshold, nodeKey, Params, passThroughFindings,
-  pathText, pathTo, repeatedAmounts, Row, totals, trace, unusualHours, walletTable,
+  pathText, pathTo, repeatedAmounts, Row, stopOf, totals, trace, unusualHours, walletTable,
 } from './analysis-rules';
 import { found, id, int } from './util';
 
@@ -53,6 +54,7 @@ export class CaseAnalysisController implements OnModuleInit {
     private jobs: Jobs,
     private labels: LabelsService,
     private risk: RiskService,
+    private por: BinancePor,
   ) {}
 
   onModuleInit() {
@@ -87,6 +89,19 @@ export class CaseAnalysisController implements OnModuleInit {
     if (all.length > seeds.length) notes.push(`Only the ${seeds.length} largest of ${all.length} recipient wallets were traced (limit ${MAX_SEEDS}).`);
     if (rows.some((r) => r.status === 'pending')) notes.push('Some transactions were still waiting for on-chain verification when this analysis ran; they are counted as claimed.');
 
+    // Binance proof-of-reserves: mark recipients that are Binance wallets before tracing, so the trace ends there (nothing from the list is stored).
+    const porCheck = async (list: { chain: string; address: string }[], what: string) => {
+      if (!list.length) return;
+      try {
+        const r = await this.por.check(list.map((w) => ({ chain: w.chain as 'tron' | 'eth' | 'bsc', address: w.address })));
+        if (r.matches.length) notes.push(`${r.matches.length} ${what} matched Binance's proof-of-reserves list (snapshot ${r.snapshot}).`);
+      } catch (e) {
+        notes.push(`Binance proof-of-reserves check skipped for ${what}: ${(e as Error).message}`);
+      }
+    };
+    await report(0, 'checking Binance proof-of-reserves');
+    await porCheck(all, 'recipient wallet(s)');
+
     await report(0, 'tracing wallets');
     const res = await trace(seeds.map((w) => ({ chain: w.chain, address: w.address, after: w.first ?? 0 })), p, {
       transfers: (c, addr, seed) => timeout(getTransfers(c as Chain, addr, seed ? 500 : 200, false, seed ? 'case' : 'graph'), 60_000), // recipients get a full backfill; onward hops never do
@@ -95,6 +110,21 @@ export class CaseAnalysisController implements OnModuleInit {
       onProgress: (n) => report(n, 'tracing wallets'),
     });
     if (seeds.length && res.stats.failed === seeds.length && !res.stats.walletsTraced) throw new Error(`No recipient wallet could be read from the chain: ${[...res.nodes.values()].find((n) => n.error)?.error ?? 'unknown error'}`);
+
+    // Unlabelled high-activity endpoints are often exchange wallets: check them against Binance's list and relabel matches.
+    const busy = [...res.nodes.values()].filter((n) => n.stop === 'busy' && !n.labels.length);
+    if (busy.length) {
+      await report(res.stats.walletsTraced, 'checking endpoints against Binance proof-of-reserves');
+      await porCheck(busy, 'high-activity endpoint(s)');
+      for (const chain of new Set(busy.map((n) => n.chain))) {
+        const found = await this.labels.lookup(chain as Chain, busy.filter((n) => n.chain === chain).map((n) => n.address), orgId);
+        for (const n of busy.filter((x) => x.chain === chain)) {
+          const l = found.get(n.address) ?? [];
+          const stop = stopOf(l);
+          if (l.length && stop) Object.assign(n, { labels: l, stop, stopReason: `labelled ${stop} wallet (${l[0].name}): endpoint, not traced further` });
+        }
+      }
+    }
 
     // Per recipient wallet: balance + risk (labels, reasons). Own time budget so a slow upstream cannot stall the run.
     await report(res.stats.walletsTraced, 'scoring recipients');
