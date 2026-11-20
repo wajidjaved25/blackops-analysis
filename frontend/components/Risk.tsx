@@ -53,7 +53,7 @@ export function TxLink({ hash, chain }: { hash: string; chain: string }) {
 
 export const CATEGORY_LEGEND: [string, string][] = [
   ['Sanctioned / frozen / terror / ransomware / darknet', '#ef4444'], ['Scam / fraud', '#f43f5e'], ['Mixer', '#f97316'], ['Gambling', '#f59e0b'],
-  ['Exchange / service', '#14b8a6'], ['Other label', '#8b5cf6'], ['Unlabelled', '#8b94a7'],
+  ['Exchange / service', '#14b8a6'], ['Bridge', '#0ea5e9'], ['DEX', '#6366f1'], ['Other label', '#8b5cf6'], ['Unlabelled', '#8b94a7'],
 ];
 export function CategoryLegend() {
   return <div className="legend" aria-label="Category colours">{CATEGORY_LEGEND.map(([n, c]) => <span key={n}><i className="dot" style={{ background: c }} />{n}</span>)}</div>;

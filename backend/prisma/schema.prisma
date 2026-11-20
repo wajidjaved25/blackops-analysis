@@ -102,7 +102,8 @@ model Label {
   address    String // eth lowercase, tron base58
   name       String
   category   String
-  source     String // ofac | tether | circle | manual | import | cluster
+  source     String // ofac | tether | circle | manual | import | cluster | official
+  sourceUrl  String? // provenance page for source=official (fetched and quoted from the vendor, never invented)
   confidence Float    @default(1)
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt

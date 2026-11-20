@@ -161,6 +161,8 @@ export const tronGap = () => (process.env.TRONGRID_API_KEY ? 80 : 350);
 export interface PageOpts {
   minTs?: number; // only rows at or after this ms timestamp (inclusive, so a tx is never split)
   minBlock?: number; // EVM equivalent
+  maxTs?: number; // only rows at or before this ms timestamp (Tron)
+  maxBlock?: number; // EVM equivalent
   fresh?: boolean;
   pageSize?: number;
   assets?: AssetFilter | AssetDef[]; // default: every asset registered for the chain
@@ -168,7 +170,7 @@ export interface PageOpts {
 
 async function* tronPages(addr: string, o: PageOpts, d: AssetDef): AsyncGenerator<Transfer[]> {
   let url: string | undefined =
-    `${TRONGRID}/v1/accounts/${addr}/transactions/trc20?only_confirmed=true&limit=200&contract_address=${d.contract}` + (o.minTs ? `&min_timestamp=${o.minTs}` : '');
+    `${TRONGRID}/v1/accounts/${addr}/transactions/trc20?only_confirmed=true&limit=200&contract_address=${d.contract}` + (o.minTs ? `&min_timestamp=${o.minTs}` : '') + (o.maxTs ? `&max_timestamp=${o.maxTs}` : '');
   while (url) {
     const j = await fetchJson(url, { headers: tronHeaders() }, tronGap(), o.fresh);
     // TronGrid mixes Approval events into this list (often uint256-max values) — they move no funds.
@@ -222,7 +224,7 @@ async function etherscan(chain: 'eth' | 'bsc', params: string, fresh = false): P
 async function* evmPages(chain: 'eth' | 'bsc', addr: string, o: PageOpts, d: AssetDef): AsyncGenerator<Transfer[]> {
   // Etherscan caps rows per call, so walk backwards block range by block range (newest first).
   const offset = o.pageSize ?? 10000;
-  let end: number | null = null;
+  let end: number | null = o.maxBlock ?? null;
   do {
     const rows = await etherscan(
       chain,
@@ -266,6 +268,13 @@ export interface TxDetail {
   timestamp: number;
   success: boolean;
   transfers: { from: string; to: string; amount: number; asset: Asset }[]; // tracked stablecoin transfers only
+  nativeSymbol: 'TRX' | 'ETH' | 'BNB';
+  native: NativeMove[]; // value-carrying internal calls (TRX / ETH / BNB), failed ones excluded — what swap detection reads
+}
+export interface NativeMove {
+  from: string;
+  to: string;
+  amount: number;
 }
 const TRANSFER_TOPIC = 'ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 
@@ -276,6 +285,11 @@ async function tronTx(hash: string): Promise<TxDetail> {
     tronGap(),
   );
   if (!j?.id) throw new NotFoundException('Transaction not found on Tron');
+  return parseTronTx(j, hash);
+}
+
+/** gettransactioninfobyid response -> TxDetail (pure, so selfcheck can run it on a crafted response). */
+export function parseTronTx(j: any, hash: string): TxDetail {
   const byHex = new Map(assetsOf('tron').map((d) => [tronToHex20(d.contract), d]));
   return {
     chain: 'tron',
@@ -283,6 +297,11 @@ async function tronTx(hash: string): Promise<TxDetail> {
     block: j.blockNumber,
     timestamp: j.blockTimeStamp,
     success: j.receipt?.result === 'SUCCESS',
+    nativeSymbol: 'TRX',
+    // A TRX payout (e.g. a swap's output) is an internal call with a callValue in SUN; rejected calls moved nothing.
+    native: (j.internal_transactions ?? [])
+      .filter((i: any) => !i.rejected && Number(i.callValueInfo?.[0]?.callValue) > 0)
+      .map((i: any) => ({ from: hexToTron(i.caller_address), to: hexToTron(i.transferTo_address), amount: parseUnits(BigInt(i.callValueInfo[0].callValue), 6) })),
     transfers: (j.log ?? [])
       .filter((l: any) => byHex.has(l.address?.slice(-40)) && l.topics?.[0] === TRANSFER_TOPIC)
       .map((l: any) => {
@@ -290,6 +309,13 @@ async function tronTx(hash: string): Promise<TxDetail> {
         return { from: hexToTron(l.topics[1]), to: hexToTron(l.topics[2]), amount: parseUnits(BigInt('0x' + l.data), d.decimals), asset: d.asset };
       }),
   };
+}
+
+async function evmInternal(chain: 'eth' | 'bsc', hash: string): Promise<NativeMove[]> {
+  const rows = await etherscan(chain, `module=account&action=txlistinternal&txhash=${hash}`);
+  return (Array.isArray(rows) ? rows : [])
+    .filter((x: any) => x.isError === '0' && BigInt(x.value || 0) > 0n)
+    .map((x: any) => ({ from: x.from.toLowerCase(), to: x.to.toLowerCase(), amount: parseUnits(x.value, 18) }));
 }
 
 async function evmTx(chain: 'eth' | 'bsc', hash: string): Promise<TxDetail> {
@@ -302,6 +328,8 @@ async function evmTx(chain: 'eth' | 'bsc', hash: string): Promise<TxDetail> {
     block: Number(r.blockNumber),
     timestamp: Number(b?.timestamp ?? 0) * 1000,
     success: r.status === '0x1',
+    nativeSymbol: chain === 'bsc' ? 'BNB' : 'ETH',
+    native: await evmInternal(chain, hash),
     transfers: (r.logs ?? []).flatMap((l: any) => {
       const d = assetByContract(chain, l.address ?? '');
       if (!d || l.topics?.[0] !== '0x' + TRANSFER_TOPIC || l.topics.length !== 3) return [];
@@ -366,7 +394,40 @@ export async function ethFreezeEvents(issuer: 'tether' | 'circle', fromBlock: nu
 }
 
 // ---------- Public API ----------
-export const getTx = (c: Chain, hash: string) => (c === 'tron' ? tronTx(hash) : evmTx(c, hash.toLowerCase()));
+/** A confirmed transaction never changes, so tx detail (incl. what swap detection needs) is cached for a day on top of the 15-min HTTP cache. */
+export async function getTx(c: Chain, hash: string): Promise<TxDetail> {
+  const h = c === 'tron' ? hash : hash.toLowerCase();
+  const key = `tx:v2:${c}:${h}`;
+  const hit = await cacheGet(key);
+  if (hit !== undefined) return hit;
+  const t = await (c === 'tron' ? tronTx(h) : evmTx(c, h));
+  await cacheSet(key, t, 86400);
+  return t;
+}
+
+/** Block number at (or just before/after) a Unix time on an EVM chain — turns a time window into a block window. */
+async function evmBlockAt(chain: 'eth' | 'bsc', tsMs: number, closest: 'before' | 'after'): Promise<number> {
+  const r = await etherscan(chain, `module=block&action=getblocknobytime&timestamp=${Math.floor(tsMs / 1000)}&closest=${closest}`);
+  return Number(r);
+}
+
+/**
+ * Transfers of one wallet inside [fromMs, toMs] (not just the newest N), straight from the explorer API: Tron via
+ * min/max_timestamp, EVM via getblocknobytime + startblock/endblock. Bounded: stops after `maxRows` and says so.
+ */
+export async function windowTransfers(c: Chain, addr: string, fromMs: number, toMs: number, assets: AssetFilter = 'all', maxRows = 600): Promise<{ rows: Transfer[]; truncated: boolean }> {
+  const o: PageOpts = c === 'tron' ? { minTs: fromMs, maxTs: toMs, assets } : { minBlock: await evmBlockAt(c, fromMs, 'after'), maxBlock: await evmBlockAt(c, toMs, 'before'), assets };
+  const rows: Transfer[] = [];
+  let truncated = false;
+  for await (const page of apiPages(c, addr, o)) {
+    rows.push(...page);
+    if (rows.length >= maxRows) {
+      truncated = true;
+      break;
+    }
+  }
+  return { rows: rows.filter((t) => t.timestamp >= fromMs && t.timestamp <= toMs), truncated };
+}
 
 const defsFor = (c: Chain, a?: PageOpts['assets']): AssetDef[] => (Array.isArray(a) ? a : selectAssets(c, a));
 

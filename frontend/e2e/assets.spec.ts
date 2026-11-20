@@ -18,7 +18,7 @@ test('address page: asset chips filter USDT / USDC and the Tron USDC note shows'
   await page.goto(`/address/${BOTH}`);
   await expect(page.getByRole('heading', { name: 'Assets' })).toBeVisible({ timeout: 120_000 });
   await expect(chip(page, 'Asset', 'All')).toHaveAttribute('aria-pressed', 'true');
-  await expect(page.getByText(/historical-only|historical only/).first()).toBeVisible(); // Tron USDC row in the Assets card
+  await expect(page.getByText(/issuer support ended/).first()).toBeVisible(); // Tron USDC row in the Assets card
   const transfers = page.getByRole('table', { name: 'Transfers' });
   // combined: both assets appear
   await expect(transfers.getByText('USDC').first()).toBeVisible();

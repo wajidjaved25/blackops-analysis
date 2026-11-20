@@ -73,7 +73,7 @@ export const csvCell = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"
 export type Level = 'severe' | 'high' | 'medium' | 'low';
 export const CATEGORY_COLOR: Record<string, string> = {
   sanctioned: '#ef4444', frozen: '#ef4444', terrorism: '#ef4444', terror: '#ef4444', ransomware: '#ef4444', darknet: '#ef4444',
-  scam: '#f43f5e', fraud: '#f43f5e', mixer: '#f97316', gambling: '#f59e0b', exchange: '#14b8a6', service: '#14b8a6', other: '#8b5cf6',
+  scam: '#f43f5e', fraud: '#f43f5e', mixer: '#f97316', gambling: '#f59e0b', exchange: '#14b8a6', service: '#14b8a6', bridge: '#0ea5e9', dex: '#6366f1', other: '#8b5cf6',
 };
 export const UNLABELLED = '#8b94a7';
 export const catColor = (c?: string | null) => (c ? CATEGORY_COLOR[c] ?? CATEGORY_COLOR.other : UNLABELLED);

@@ -7,6 +7,7 @@ import { CasesController, CasesService } from './cases';
 import { Db } from './db';
 import { InvestigateController } from './investigate.controller';
 import { Jobs } from './jobs';
+import { CrossChainController } from './crosschain';
 import { LabelsController, LabelsService } from './labels';
 import { MonitorController, MonitorService, Notifier } from './monitor';
 import { RiskController, RiskService } from './risk';
@@ -14,7 +15,7 @@ import { IndexController, TransferIndex } from './transfer-index';
 import { ScreenController, ScreenWorker } from './screen';
 
 @Module({
-  controllers: [AuthController, UsersController, RolesController, OrgController, ApiKeysController, AuditController, InvestigateController, LabelsController, RiskController, ScreenController, MonitorController, CasesController, AttributionController, IndexController],
+  controllers: [AuthController, UsersController, RolesController, OrgController, ApiKeysController, AuditController, InvestigateController, LabelsController, RiskController, ScreenController, MonitorController, CasesController, AttributionController, IndexController, CrossChainController],
   providers: [Db, Jobs, LabelsService, RiskService, ScreenWorker, MonitorService, Notifier, RoleSeeder, CasesService, ClusterWorker, TransferIndex, { provide: APP_GUARD, useClass: AuthGuard }],
 })
 export class AppModule {}

@@ -5,6 +5,7 @@ import { assetsOf, CHAINS, selectAssets } from './assets';
 import { AssetFilter, Chain, flows, frozenBy, frozenStatus, getBalances, getTransfers, getTx, isTxHash, norm, Transfer } from './chains';
 import { audit, Ctx, Db } from './db';
 import { buildGraph, findPath, GetFlows, GraphNode, withVolumes } from './graph';
+import { swapsOfTx } from './crosschain';
 import { LabelsService } from './labels';
 import { RiskService } from './risk';
 import { TransferIndex } from './transfer-index';
@@ -134,10 +135,11 @@ export class InvestigateController {
 
   @Perm('investigate.view')
   @Get('tx/:chain/:hash')
-  tx(@Param('chain') chain: Chain, @Param('hash') hash: string) {
+  async tx(@CurrentCtx() ctx: Ctx, @Param('chain') chain: Chain, @Param('hash') hash: string) {
     oneOf(chain, 'chain', CHAINS);
     if (!isTxHash(chain, hash)) throw new BadRequestException(`Not a valid ${chain} transaction hash`);
-    return getTx(chain, hash);
+    const tx = await getTx(chain, hash);
+    return { ...tx, swaps: await swapsOfTx(this.labels, tx, ctx.orgId) }; // 7.14: evidence from this one tx (native payout / dex label)
   }
 
   @Perm('investigate.view')

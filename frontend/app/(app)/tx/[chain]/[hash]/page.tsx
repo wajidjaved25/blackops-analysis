@@ -1,5 +1,5 @@
 'use client';
-import { ArrowRight, CheckCircle2, ExternalLink, XCircle } from 'lucide-react';
+import { ArrowRight, ArrowRightLeft, CheckCircle2, ExternalLink, XCircle } from 'lucide-react';
 import { useParams, useRouter } from 'next/navigation';
 import { AssetTag } from '@/components/Assets';
 import { RequirePerm } from '@/components/Guard';
@@ -8,7 +8,8 @@ import { Badge, Card, CopyButton, DateTime, EmptyState, ErrorState, Notice, Page
 import { Chain, chainName, explorerTx, money } from '@/lib/format';
 import { useApi } from '@/lib/hooks';
 
-interface Tx { chain: Chain; hash: string; block: number; timestamp: number; success: boolean; transfers: { from: string; to: string; amount: number; asset: 'usdt' | 'usdc' }[] }
+interface Tx { chain: Chain; hash: string; block: number; timestamp: number; success: boolean; transfers: { from: string; to: string; amount: number; asset: 'usdt' | 'usdc' }[]; nativeSymbol: string; swaps?: Swap[] }
+export interface Swap { wallet: string; direction: 'out' | 'in'; asset: 'usdt' | 'usdc'; amount: number; native?: { symbol: string; amount: number }; dex?: { address: string; name: string }; summary: string; reasons: string[] }
 
 export default function TxPage() {
   const { chain, hash } = useParams<{ chain: string; hash: string }>();
@@ -39,6 +40,23 @@ export default function TxPage() {
                 </div>
               )}
             </Card>
+            {(t.swaps ?? []).length > 0 && (
+              <Card title={<span className="row"><ArrowRightLeft size={15} />Swap detected</span>}>
+                <div className="stack" data-testid="swap-card">
+                  {t.swaps!.map((s, i) => (
+                    <div key={i} className="stack sm" style={{ borderBottom: i < t.swaps!.length - 1 ? '1px solid var(--border)' : undefined, paddingBottom: 10 }}>
+                      <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                        <Badge tone="medium">{s.direction === 'out' ? (s.native ? `Left ${s.asset.toUpperCase()} here → ${s.native.symbol}` : `${s.asset.toUpperCase()} → DEX`) : `${s.asset.toUpperCase()} from DEX`}</Badge>
+                        <AddressLink address={s.wallet} chain={t.chain} />
+                      </div>
+                      <strong>{s.summary}</strong>
+                      <ul className="small muted" style={{ margin: 0, paddingLeft: 18 }}>{s.reasons.map((r, j) => <li key={j}>{r}</li>)}</ul>
+                    </div>
+                  ))}
+                  <p className="xs muted">Evidence from this one transaction only (the wallet paid out stablecoin and, in the same transaction, received native coin or paid a wallet labelled <i>dex</i>). It is not an identity claim; swaps that end in a wrapped token with no native payout are not detected.</p>
+                </div>
+              </Card>
+            )}
             {!t.success && <Notice tone="warn">This transaction failed on-chain; no funds moved.</Notice>}
           </>
         )}

@@ -1,7 +1,9 @@
 // Run: npm run check — fails loudly if core logic breaks. No network calls.
 import assert from 'node:assert/strict';
 import { assetByContract, ASSETS, CHAINS, CIRCLE, parseUnits, REGISTRY, selectAssets, TETHER } from './assets';
-import { detectChain, flows, FrozenMap, frozenBy, hexToTron, isTxHash, norm, parseFreezeLog, Transfer, tronToHex20 } from './chains';
+import { rankHops, selfCheckHops } from './bridge-hop';
+import { detectSwaps, selfCheckSwap } from './swap';
+import { detectChain, flows, parseTronTx, FrozenMap, frozenBy, hexToTron, isTxHash, norm, parseFreezeLog, Transfer, tronToHex20 } from './chains';
 import { buildGraph, findPath } from './graph';
 import { level, scoreRisk } from './risk-score';
 import { clusterConfidence, depositEvidence } from './cluster';
@@ -323,6 +325,26 @@ async function main() {
   assert.equal(evaluateRules(amt, ME, [usdcBig], [usdcBig], noLabels, nowMs).length, 1); // rules without an asset param (pre-7B) watch every asset
   assert.deepEqual(ruleParams('amount_over', { amount: 5 }), { amount: 5, asset: 'all' });
   assert.throws(() => ruleParams('amount_over', { amount: 5, asset: 'dai' }));
+
+  // --- 7C: swap detection on a crafted gettransactioninfobyid (shape taken from real Tron tx 987c9423…) + bridge hop matching ---
+  const U = '41' + '4b94ceb73c5a7b37f02a1c22a7016555ed3caf57';
+  const info = {
+    id: 'x', blockNumber: 1, blockTimeStamp: 1, receipt: { result: 'SUCCESS' },
+    log: [{ address: 'a614f803b6fd780986a42c78ec9c7f77e6ded13c', topics: ['ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef', '0'.repeat(24) + U.slice(2), '0'.repeat(24) + '3a10321a4e97a64d9376af42ec07d5fa50294b35'], data: '0'.repeat(48) + '015ef3c0'.padStart(16, '0') }],
+    internal_transactions: [
+      { caller_address: '41891cdb91d149f23b1a45d9c5ca78a88d0cb44c18', transferTo_address: '41b31b7d4b62a05c2ed0e1cadb1ba466dfacbf37c6', callValueInfo: [{ callValue: 73993270 }] },
+      { caller_address: '41b31b7d4b62a05c2ed0e1cadb1ba466dfacbf37c6', transferTo_address: U, callValueInfo: [{ callValue: 73993270 }] },
+      { caller_address: '41b31b7d4b62a05c2ed0e1cadb1ba466dfacbf37c6', transferTo_address: '41891cdb91d149f23b1a45d9c5ca78a88d0cb44c18', callValueInfo: [{}] }, // plain call, no value
+      { caller_address: U, transferTo_address: '41b31b7d4b62a05c2ed0e1cadb1ba466dfacbf37c6', callValueInfo: [{ callValue: 5000000 }], rejected: true }, // rejected: moved nothing
+    ],
+  };
+  const ptx = parseTronTx(info, 'x');
+  assert.deepEqual([ptx.nativeSymbol, ptx.native.length, ptx.transfers.length, ptx.transfers[0].amount], ['TRX', 2, 1, 23]);
+  const sw = detectSwaps(ptx, () => undefined);
+  assert.deepEqual([sw.length, sw[0].wallet, sw[0].amount, sw[0].native?.amount], [1, hexToTron(U), 23, 73.99327]);
+  selfCheckSwap(assert);
+  selfCheckHops(assert);
+  assert.equal(rankHops({ chain: 'tron', amount: 10, asset: 'usdt', ts: 0, bridgeName: 'a' }, []).length, 0);
 
   // --- SSRF guard ---
   assert.ok(['127.0.0.1', '10.1.2.3', '172.16.0.1', '192.168.1.1', '169.254.169.254', '::1', 'fd00::1', '::ffff:10.0.0.1'].every(privateIp));

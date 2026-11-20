@@ -6,7 +6,8 @@ import { Chain, detectChain, ethFreezeEvents, hasEtherscanKey, norm, tronFreezeE
 import { audit, Ctx, Db } from './db';
 import { Jobs } from './jobs';
 import { CATEGORIES } from './risk-score';
-import { assertPublicUrl, id, int, oneOf, parseCsv, str } from './util';
+import { assertPublicUrl, id, int, oneOf, parseAddr, parseCsv, str } from './util';
+import { OFFICIAL_LABELS } from './official-labels';
 
 const OFAC_LISTS = ['USDT', 'TRX', 'ETH'].map(
   (s) => `https://raw.githubusercontent.com/0xB10C/ofac-sanctioned-digital-currency-addresses/lists/sanctioned_addresses_${s}.txt`,
@@ -31,6 +32,23 @@ export class LabelsService implements OnModuleInit {
     });
     this.jobs.every('tether-sync', 30 * 60_000, () => this.syncTether(), 15_000);
     this.jobs.every('circle-sync', 30 * 60_000, () => this.syncCircle(), 45_000);
+    this.seedOfficial().catch((e) => this.log.error(`official label seed failed: ${(e as Error).message}`));
+  }
+
+  /** Idempotent: upserts the vendor-sourced labels in official-labels.ts as global rows with their provenance URL. */
+  async seedOfficial() {
+    for (const l of OFFICIAL_LABELS) {
+      const where = { chain_address_source_orgId: { chain: l.chain, address: l.address, source: 'official', orgId: 0 } };
+      await this.db.label.upsert({ where, create: { chain: l.chain, address: l.address, name: l.name, category: l.category, source: 'official', sourceUrl: l.url, orgId: 0 }, update: { name: l.name, category: l.category, sourceUrl: l.url } });
+    }
+  }
+
+  /** Labels of the given categories on exactly this chain (no Ethereum -> BNB Chain carry-over: bridge and dex contracts differ per chain). */
+  exact(chain: Chain, categories: string[], orgId: number, addresses?: string[]) {
+    return this.db.label.findMany({
+      where: { chain, category: { in: categories }, orgId: { in: [0, orgId] }, ...(addresses ? { address: { in: addresses.map(norm) } } : {}) },
+      select: { address: true, name: true, category: true, source: true, sourceUrl: true },
+    });
   }
 
   /** Labels for many addresses on one chain, visible to the org (global + its own). */
@@ -153,14 +171,15 @@ export class LabelsService implements OnModuleInit {
     return Buffer.concat(chunks).toString('utf8');
   }
 
-  /** Validate CSV rows `address,name,category[,confidence]` (chain auto-detected). */
+  /** Validate CSV rows `address,name,category[,confidence[,chain]]` (chain auto-detected; `bsc` in the 5th column marks a 0x address as BNB Chain). */
   parseImport(csv: string) {
     const rows = parseCsv(csv);
     if (rows[0]?.[0]?.trim().toLowerCase() === 'address') rows.shift();
     if (rows.length > 20000) throw new BadRequestException('Max 20,000 rows per import');
     return rows.map((r, i) => {
-      const [address = '', name = '', category = '', confidence = ''] = r.map((c) => c.trim());
-      const chain = detectChain(address);
+      const [address = '', name = '', category = '', confidence = '', chainHint = ''] = r.map((c) => c.trim());
+      let chain: Chain | null = detectChain(address);
+      if (chain && chainHint) chain = (chainHint === 'bsc' || chainHint === 'eth' || chainHint === 'tron') && (chainHint === 'tron') === (chain === 'tron') ? chainHint : null;
       const conf = confidence === '' ? 1 : Number(confidence);
       const error = !chain
         ? 'invalid address'
@@ -226,8 +245,7 @@ export class LabelsController {
   @Post()
   async create(@CurrentCtx() ctx: Ctx, @Body() b: any) {
     const address = str(b.address, 'address');
-    const chain = detectChain(address);
-    if (!chain) throw new BadRequestException('Invalid address');
+    const { chain } = parseAddr(address, b.chain); // optional chain: a 0x address defaults to Ethereum, "bsc" makes it a BNB Chain label
     const data = { chain, address: norm(address), name: str(b.name, 'name', { max: 200 }), category: oneOf(b.category, 'category', CATEGORIES), source: 'manual', orgId: ctx.orgId };
     const l = await this.db.label.upsert({
       where: { chain_address_source_orgId: { chain, address: data.address, source: 'manual', orgId: ctx.orgId } },

@@ -1,7 +1,9 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
+import { Chain, isEvmAddr } from '@/lib/format';
 import { useApi } from '@/lib/hooks';
+import { ChainChoice } from './Assets';
 import { Modal } from './Modal';
 import { useToast } from './Toast';
 import { Button, Field, Input, Notice, Select, Textarea } from './ui';
@@ -88,18 +90,19 @@ export function WatchModal({ address, chain, onClose }: { address: string; chain
 export function AddLabelModal({ address, onClose, onDone }: { address?: string; onClose: () => void; onDone?: () => void }) {
   const toast = useToast();
   const st = useApi<{ categories: string[] }>('/labels/status');
-  const cats = st.data?.categories ?? ['sanctioned', 'frozen', 'ransomware', 'darknet', 'terrorism', 'scam', 'fraud', 'mixer', 'gambling', 'other', 'exchange', 'service'];
-  const [f, setF] = useState({ address: address ?? '', name: '', category: 'other' });
+  const cats = st.data?.categories ?? ['sanctioned', 'frozen', 'ransomware', 'darknet', 'terrorism', 'scam', 'fraud', 'mixer', 'gambling', 'other', 'exchange', 'service', 'bridge', 'dex'];
+  const [f, setF] = useState({ address: address ?? '', name: '', category: 'other', chain: '' });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   return (
     <Modal title="Add label" onClose={onClose} footer={<><Button onClick={onClose}>Cancel</Button><Button variant="primary" busy={busy} disabled={!f.address || !f.name} onClick={async () => {
       setBusy(true); setErr('');
-      try { await api('/labels', { body: { ...f, address: f.address.trim(), name: f.name.trim() } }); toast.success('Label added'); onDone?.(); onClose(); }
+      try { await api('/labels', { body: { ...f, chain: isEvmAddr(f.address.trim()) ? f.chain || undefined : undefined, address: f.address.trim(), name: f.name.trim() } }); toast.success('Label added'); onDone?.(); onClose(); }
       catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
     }}>Save label</Button></>}>
       <div className="stack">
         <Field label="Address"><Input className="mono" value={f.address} disabled={!!address} onChange={(e) => setF({ ...f, address: e.target.value })} placeholder="T… or 0x…" /></Field>
+        <ChainChoice addr={f.address} value={(f.chain || 'eth') as Chain} onChange={(c) => setF({ ...f, chain: c })} />
         <Field label="Name" hint="Visible to your organisation only."><Input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} placeholder="e.g. Binance deposit" autoFocus /></Field>
         <Field label="Category"><Select value={f.category} onChange={(e) => setF({ ...f, category: e.target.value })}>{cats.map((c) => <option key={c}>{c}</option>)}</Select></Field>
         {err && <Notice tone="error">{err}</Notice>}

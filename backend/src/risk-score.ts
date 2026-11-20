@@ -14,6 +14,8 @@ export const WEIGHTS: Record<string, number> = {
   other: 20,
   exchange: 0,
   service: 0,
+  bridge: 0, // 7C: informational — funds may continue on another chain (bridge-hop.ts)
+  dex: 0, // 7C: informational — a swap venue (swap.ts)
 };
 export const CATEGORIES = Object.keys(WEIGHTS);
 export const INDIRECT_DISCOUNT = 0.5;

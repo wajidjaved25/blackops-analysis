@@ -13,7 +13,7 @@ import { useAuth } from '@/lib/auth';
 import { num } from '@/lib/format';
 import { useApi, useDebounced } from '@/lib/hooks';
 
-interface Label { id: number; orgId: number; chain: string; address: string; name: string; category: string; source: string; confidence?: number; createdAt: string }
+interface Label { id: number; orgId: number; chain: string; address: string; name: string; category: string; source: string; sourceUrl?: string | null; confidence?: number; createdAt: string }
 interface St { counts: Record<string, number>; ofacLastSync?: string; tetherLastSync?: string; circleLastSync?: string; etherscanKey?: boolean; categories: string[] }
 interface Dry { total: number; valid: number; errors: { line: number; address: string; error: string }[]; preview?: unknown[] }
 
@@ -62,7 +62,7 @@ export default function Labels() {
         <Card flush title={<span className="row">
           <span style={{ position: 'relative' }}><Search size={14} style={{ position: 'absolute', left: 10, top: 8, color: 'var(--faint)' }} aria-hidden /><Input sm style={{ paddingLeft: 30, width: 240 }} placeholder="Search name or address" aria-label="Search labels" value={q} onChange={(e) => { setQ(e.target.value); setPage(0); }} /></span>
           <Select sm style={{ width: 150 }} aria-label="Category" value={cat} onChange={(e) => { setCat(e.target.value); setPage(0); }}><option value="">All categories</option>{(st.data?.categories ?? []).map((c) => <option key={c}>{c}</option>)}</Select>
-          <Select sm style={{ width: 130 }} aria-label="Source" value={src} onChange={(e) => { setSrc(e.target.value); setPage(0); }}><option value="">All sources</option>{['ofac', 'tether', 'circle', 'manual', 'import', 'cluster'].map((c) => <option key={c}>{c}</option>)}</Select>
+          <Select sm style={{ width: 130 }} aria-label="Source" value={src} onChange={(e) => { setSrc(e.target.value); setPage(0); }}><option value="">All sources</option>{['ofac', 'tether', 'circle', 'official', 'manual', 'import', 'cluster'].map((c) => <option key={c}>{c}</option>)}</Select>
         </span>}>
           {list.loading ? <SkeletonRows /> : list.error ? <ErrorState error={list.error} status={list.status} onRetry={list.reload} /> : (
             <Table caption="Labels" rows={list.data?.rows ?? []} rowKey={(l) => l.id} pageSize={100} server={{ page, total: list.data?.total ?? 0, pageSize: list.data?.pageSize ?? 100, onPage: setPage }}
@@ -71,7 +71,7 @@ export default function Labels() {
                 { key: 'a', header: 'Address', cell: (l) => <AddressLink address={l.address} /> },
                 { key: 'n', header: 'Name', cell: (l) => <span style={{ fontWeight: 550 }}>{l.name}</span> },
                 { key: 'c', header: 'Category', cell: (l) => <CategoryChip category={l.category} /> },
-                { key: 's', header: 'Source', cell: (l) => <Badge tone="outline">{l.source}{l.orgId === 0 ? ' · global' : ''}</Badge> },
+                { key: 's', header: 'Source', cell: (l) => <span className="row nw" style={{ gap: 6 }}><Badge tone="outline">{l.source}{l.orgId === 0 ? ' · global' : ''}</Badge>{l.sourceUrl && <a href={l.sourceUrl} target="_blank" rel="noreferrer" className="xs" title={l.sourceUrl}>source page</a>}</span> },
                 { key: 'k', header: 'Conf.', num: true, cell: (l) => (l.confidence != null ? `${Math.round(l.confidence <= 1 ? l.confidence * 100 : l.confidence)}%` : '—') },
                 { key: 'x', header: '', cell: (l) => l.orgId !== 0 && manage ? <Button sm variant="ghost" icon aria-label={`Delete label ${l.name}`} onClick={() => setDel(l)}><Trash2 size={14} /></Button> : null },
               ]} />
@@ -104,7 +104,7 @@ function ImportModal({ mode, onClose, onDone }: { mode: 'csv' | 'url'; onClose: 
       <Button busy={busy} disabled={!input.trim()} onClick={async () => { setBusy(true); setErr(''); try { setDry(await call(true)); } catch (e) { setErr((e as Error).message); } finally { setBusy(false); } }}>Preview (dry run)</Button>
       <Button variant="primary" busy={busy} disabled={!dry || !dry.valid} onClick={async () => { setBusy(true); try { const r = await call(false); toast.success(`Imported ${r.inserted ?? 0}, skipped ${r.skipped ?? 0}`); onDone(); onClose(); } catch (e) { setErr((e as Error).message); } finally { setBusy(false); } }}>Import {dry?.valid ?? ''} valid</Button></>}>
       <div className="stack">
-        <p className="muted small">Columns: <code>address,name,category[,confidence]</code>. Run a dry run first to see problems before anything is saved.</p>
+        <p className="muted small">Columns: <code>address,name,category[,confidence[,chain]]</code>. Add <code>bsc</code> as the chain for a 0x address on BNB Chain (default Ethereum). Categories include <code>bridge</code> and <code>dex</code>, which the cross-chain tools use. Run a dry run first to see problems before anything is saved.</p>
         {mode === 'csv' ? (
           <>
             <Textarea className="mono" rows={6} value={csv} onChange={(e) => { setCsv(e.target.value); setDry(null); }} placeholder={'address,name,category\nT…,My exchange,exchange'} />
