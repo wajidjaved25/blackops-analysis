@@ -4,6 +4,8 @@ const API = process.env.API_URL ?? 'http://localhost:4000';
 
 const config: NextConfig = {
   poweredByHeader: false,
+  // /api proxy: Next's default 30 s cut turned slow chain reads (big wallets, case timelines) into 500s. Apache allows 180 s.
+  experimental: { proxyTimeout: 170_000 },
   output: 'standalone', // small self-contained server for the Docker image
   // Proxy /api/* to the Nest backend, so the browser never needs CORS.
   async headers() {
