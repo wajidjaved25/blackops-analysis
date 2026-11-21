@@ -5,7 +5,8 @@ import { CurrentCtx, Perm } from './auth';
 import { Chain, detectChain, ethFreezeEvents, fetchJson, hasEtherscanKey, norm, tronFreezeEvents } from './chains';
 import { cacheGet, cacheSet } from './kv';
 import { mapExplorerTag, parsePorList, pickTronscanTag, porName, POR_MAX_BYTES, POR_SOURCES } from './exchange-labels';
-import { BinancePor, POR_MAX_INPUT } from './binance-por';
+import { POR_MAX_INPUT } from './binance-por';
+import { rowLabel } from './exchange-parsers';
 import { ExchangeLists } from './exchange-lists';
 import { audit, Ctx, Db } from './db';
 import { Jobs } from './jobs';
@@ -21,7 +22,8 @@ const TAG_TTL_SEC = 7 * 86_400;
 const TRONSCAN = 'https://apilist.tronscanapi.com/api/accountv2';
 export const hasTronscanKey = () => !!process.env.TRONSCAN_API_KEY;
 
-export type LabelLite = Pick<Label, 'name' | 'category' | 'source' | 'confidence'>;
+export type LabelLite = Pick<Label, 'name' | 'category' | 'source' | 'confidence'> & { sourceUrl?: string | null };
+export const COMMUNITY_CONFIDENCE = 0.7;
 
 @Injectable()
 export class LabelsService implements OnModuleInit {
@@ -141,6 +143,27 @@ export class LabelsService implements OnModuleInit {
       select: { address: true, name: true, category: true, source: true, confidence: true },
     });
     for (const r of rows) m.set(r.address, [...(m.get(r.address) ?? []), r]);
+    for (const [a, l] of await this.exchangeLabels(chain, addresses)) m.set(a, [...(m.get(a) ?? []), ...l]);
+    return m;
+  }
+
+  /**
+   * Phase 10A: stored exchange lists (ExchangeAddress) as labels: hot -> category exchange, deposit / controlled -> exchange_deposit.
+   * Official lists give source 'official' (confidence 1), community datasets 'community' (0.7). BNB Chain also reads Ethereum rows (same 0x key).
+   */
+  async exchangeLabels(chain: Chain, addresses: string[]): Promise<Map<string, LabelLite[]>> {
+    const m = new Map<string, LabelLite[]>();
+    const uniq = [...new Set(addresses.map(norm))];
+    for (let i = 0; i < uniq.length; i += 2000) {
+      const rows = await this.db.exchangeAddress.findMany({
+        where: { chain: { in: chain === 'bsc' ? ['bsc', 'eth'] : [chain] }, address: { in: uniq.slice(i, i + 2000) } },
+        select: { address: true, exchange: true, kind: true, source: { select: { kind: true, listName: true, url: true } } },
+      });
+      for (const r of rows) {
+        const community = r.source.kind === 'community';
+        m.set(r.address, [...(m.get(r.address) ?? []), { ...rowLabel(r.exchange, r.kind, r.source.listName), source: community ? 'community' : 'official', confidence: community ? COMMUNITY_CONFIDENCE : 1, sourceUrl: r.source.url }]);
+      }
+    }
     return m;
   }
 
@@ -281,40 +304,36 @@ export class LabelsController {
   constructor(
     private db: Db,
     private labels: LabelsService,
-    private por: BinancePor,
     private lists: ExchangeLists,
   ) {}
 
   /**
-   * 8.19 Binance proof-of-reserves find-and-mark. Body `{addresses:[{chain,address}]}` (max 5,000, each validated). Needs `labels.sync`:
-   * a match writes a GLOBAL official label and a miss triggers a ~290 MB download. Lists are streamed and never stored.
-   * A miss is not evidence that an address is not a Binance customer (the deposit list holds balance-holding addresses only).
+   * 8.19 (rewritten in 10A): which of these addresses are in the stored exchange lists? Body `{addresses:[{chain,address}]}` (max 5,000, each validated).
+   * A pure table lookup now (the Binance lists are stored); no download, no write. A miss is not evidence the address is not a customer of that exchange.
    */
-  @Perm('labels.sync')
+  @Perm('labels.view')
   @Post('exchange-check')
-  async exchangeCheck(@CurrentCtx() ctx: Ctx, @Body() b: any) {
+  async exchangeCheck(@Body() b: any) {
     if (!Array.isArray(b?.addresses) || !b.addresses.length) throw new BadRequestException('addresses must be a non-empty list of {chain, address}');
     if (b.addresses.length > POR_MAX_INPUT) throw new BadRequestException(`Too many addresses (${b.addresses.length}); max ${POR_MAX_INPUT} per call`);
-    const seen = new Map<string, { chain: Chain; address: string }>();
+    const by = new Map<string, string[]>();
     for (const a of b.addresses) {
       const p = parseAddr(a?.address, a?.chain);
-      seen.set(p.chain + p.addr, { chain: p.chain, address: p.addr });
+      by.set(p.chain, [...(by.get(p.chain) ?? []), p.addr]);
     }
-    try {
-      const r = await this.por.check([...seen.values()]);
-      await audit(this.db, ctx, 'label.exchange-check', r.snapshot, { checked: r.checked, matched: r.matched });
-      return r;
-    } catch (e) {
-      throw new BadRequestException(`Binance check failed: ${(e as Error).message}`);
-    }
+    const matches: { chain: string; address: string; exchange: string; category: string; name: string; source: string; sourceUrl?: string | null }[] = [];
+    for (const [chain, addrs] of by)
+      for (const [address, ls] of await this.labels.exchangeLabels(chain as Chain, addrs)) for (const l of ls) matches.push({ chain, address, exchange: l.name.split(/ (?:hot\/cold wallet|customer deposit address) /)[0], category: l.category, name: l.name, source: l.source, sourceUrl: l.sourceUrl });
+    return { checked: [...by.values()].reduce((n, a) => n + new Set(a).size, 0), matched: new Set(matches.map((x) => x.chain + x.address)).size, matches };
   }
 
   /** 9C: run the stored exchange wallet-list update check now (the daily job does the same). `force` re-downloads even when the snapshot is unchanged. */
   @Perm('labels.sync')
   @Post('exchange-lists/sync')
   async syncLists(@CurrentCtx() ctx: Ctx, @Body() b: any) {
-    const r = await this.lists.syncAll(b?.force === true);
-    await audit(this.db, ctx, 'label.exchange-lists.sync', 'exchange-lists', { force: b?.force === true, status: r.map((x) => `${x.exchange}:${x.status}`) });
+    const only = typeof b?.source === 'string' && b.source ? b.source.slice(0, 40) : undefined;
+    const r = await this.lists.syncAll(b?.force === true, only);
+    await audit(this.db, ctx, 'label.exchange-lists.sync', only ?? 'exchange-lists', { force: b?.force === true, status: r.map((x) => `${x.id}:${x.status}`) });
     return r;
   }
 
@@ -347,7 +366,7 @@ export class LabelsController {
       tronscanKey: hasTronscanKey(),
       porLastSync: await s('por.lastSync'),
       porSources: POR_SOURCES.length,
-      exchangeLists: await this.lists.status(),
+      exchangeSources: await this.lists.status(),
       categories: CATEGORIES,
     };
   }
@@ -357,7 +376,11 @@ export class LabelsController {
   async forAddress(@CurrentCtx() ctx: Ctx, @Param('addr') addr: string) {
     const chain = detectChain(addr);
     if (!chain) throw new BadRequestException('Invalid address');
-    return this.db.label.findMany({ where: { chain, address: norm(addr), orgId: { in: [0, ctx.orgId] } } });
+    const own = await this.db.label.findMany({ where: { chain, address: norm(addr), orgId: { in: [0, ctx.orgId] } } });
+    const ex = (await this.labels.exchangeLabels(chain === 'eth' ? 'bsc' : chain, [addr])) // a 0x address may be keyed eth or bsc
+      .get(norm(addr)) ?? [];
+    const now = new Date();
+    return [...own, ...ex.map((l, i) => ({ id: -1 - i, orgId: 0, chain, address: norm(addr), createdAt: now, updatedAt: now, ...l }))]; // list rows have no Label id (negative)
   }
 
   /** 8.15: lazy Tronscan tag for one Tron address (high-volume counterparties); cached, needs TRONSCAN_API_KEY. */

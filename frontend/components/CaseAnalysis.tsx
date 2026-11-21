@@ -19,7 +19,7 @@ export interface Evidence { kind: 'tx' | 'wallet'; chain?: string | null; hash?:
 export interface Finding { type: string; severity: 'high' | 'medium' | 'low' | 'info'; title: string; statement: string; evidence: Evidence[]; evidenceTotal: number }
 interface WalletR {
   role?: string | null; chain: string; address: string; total: number; verified: number; count: number; first: number | null; last: number | null; share: number; balance: number | null; traced: boolean; stopReason: string | null; error: string | null;
-  labels: { name: string; category: string; source: string }[]; risk: { score: number | null; level: string | null; reasons: string[]; frozen?: boolean } | null;
+  labels: { name: string; category: string; source: string; sourceUrl?: string | null }[]; risk: { score: number | null; level: string | null; reasons: string[]; frozen?: boolean } | null;
 }
 export interface Endpoint { kind: string; chain: string; address: string; name: string | null; category: string | null; source: string | null; reason: string | null; hop: number; amount: number | null; path: string }
 export interface Result {
@@ -187,7 +187,7 @@ function EndpointTable({ rows, ad, run, side, caption, pathHeader }: { rows: End
 }
 
 const walletCols = (total: number) => [
-  { key: 'a', header: 'Wallet', cell: (w: WalletR) => <span className="row" style={{ gap: 6 }}>{w.role && <Badge tone={w.role === 'suspect' ? 'high' : 'info'}>{w.role}</Badge>}<AddressLink address={w.address} chain={w.chain} label={w.labels[0] ?? null} /></span>, sort: (w: WalletR) => w.address },
+  { key: 'a', header: 'Wallet', cell: (w: WalletR) => <span className="row" style={{ gap: 6 }}>{w.role && <Badge tone={w.role === 'suspect' ? 'high' : 'info'}>{w.role}</Badge>}<AddressLink address={w.address} chain={w.chain} label={w.labels[0] ?? null} />{w.labels[0]?.sourceUrl && (w.labels[0].category === "exchange" || w.labels[0].category === "exchange_deposit") && <a className="xs" href={w.labels[0].sourceUrl} target="_blank" rel="noreferrer noopener" title={w.labels[0].source === "community" ? "Community list (scraped labels), not the exchange's own list" : "Exchange list this address came from"}>{w.labels[0].source === "community" ? "community list" : "source"}</a>}</span>, sort: (w: WalletR) => w.address },
   { key: 'n', header: 'Payments', num: true, cell: (w: WalletR) => w.count, sort: (w: WalletR) => w.count },
   { key: 't', header: 'Total', num: true, cell: (w: WalletR) => <span title={`${(w.share * 100).toFixed(1)}% of ${money(total)} claimed`}>{money(w.total)}</span>, sort: (w: WalletR) => w.total },
   { key: 's', header: 'Share', num: true, hideSm: true, cell: (w: WalletR) => `${(w.share * 100).toFixed(1)}%`, sort: (w: WalletR) => w.share },

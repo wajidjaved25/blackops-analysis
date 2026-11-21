@@ -4,7 +4,6 @@ import { CaseAnalysis } from '@prisma/client';
 import { CurrentCtx, Perm } from './auth';
 import { CasesService } from './cases';
 import { Chain, getBalances, getTransfers, norm } from './chains';
-import { BinancePor } from './binance-por';
 import { audit, Ctx, Db } from './db';
 import { Jobs } from './jobs';
 import { LabelsService } from './labels';
@@ -66,7 +65,6 @@ export class CaseAnalysisController implements OnModuleInit {
     private jobs: Jobs,
     private labels: LabelsService,
     private risk: RiskService,
-    private por: BinancePor,
   ) {}
 
   onModuleInit() {
@@ -101,44 +99,15 @@ export class CaseAnalysisController implements OnModuleInit {
     if (all.length > seeds.length) notes.push(`Only the ${seeds.length} largest of ${all.length} recipient wallets were traced (limit ${MAX_SEEDS}).`);
     if (rows.some((r) => r.status === 'pending')) notes.push('Some transactions were still waiting for on-chain verification when this analysis ran; they are counted as claimed.');
 
-    // Binance proof-of-reserves: mark recipients that are Binance wallets before tracing, so the trace ends there (nothing from the list is stored).
-    const porCheck = async (list: { chain: string; address: string }[], what: string) => {
-      if (!list.length) return;
-      try {
-        const r = await this.por.check(list.map((w) => ({ chain: w.chain as 'tron' | 'eth' | 'bsc', address: w.address })));
-        if (r.matches.length) notes.push(`${r.matches.length} ${what} matched Binance's proof-of-reserves list (snapshot ${r.snapshot}).`);
-      } catch (e) {
-        notes.push(`Binance proof-of-reserves check skipped for ${what}: ${(e as Error).message}`);
-      }
-    };
-    await report(0, 'checking Binance proof-of-reserves');
-    await porCheck(all, 'recipient wallet(s)');
-
     const deps = {
       labels: (c: string, addrs: string[]) => this.labels.lookup(c as Chain, addrs, orgId),
       capped: async (c: string, addrs: string[]) => new Set((await this.db.indexedAddress.findMany({ where: { chain: c, address: { in: addrs }, status: 'capped' }, select: { address: true } })).map((x) => x.address)),
     };
     const transfers = (c: string, addr: string, seed: boolean) => timeout(getTransfers(c as Chain, addr, seed ? 500 : 200, false, seed ? 'case' : 'graph'), 60_000); // seeds get a full backfill; further hops never do
-    // Unlabelled high-activity endpoints are often exchange wallets: check them against Binance's list and relabel matches.
-    const relabelBusy = async (r: TraceResult) => {
-      const busy = [...r.nodes.values()].filter((n) => n.stop === 'busy' && !n.labels.length);
-      if (!busy.length) return;
-      await report(r.stats.walletsTraced, 'checking endpoints against Binance proof-of-reserves');
-      await porCheck(busy, 'high-activity endpoint(s)');
-      for (const chain of new Set(busy.map((n) => n.chain))) {
-        const found = await this.labels.lookup(chain as Chain, busy.filter((n) => n.chain === chain).map((n) => n.address), orgId);
-        for (const n of busy.filter((x) => x.chain === chain)) {
-          const l = found.get(n.address) ?? [];
-          const stop = stopOf(l);
-          if (l.length && stop) Object.assign(n, { labels: l, stop, stopReason: `labelled ${stop} wallet (${l[0].name}): endpoint, not traced further` });
-        }
-      }
-    };
     const fwdSeeds = p.direction === 'backward' ? [] : seeds;
     await report(0, 'tracing wallets');
     const res = await trace(fwdSeeds.map((w) => ({ chain: w.chain, address: w.address, after: w.first ?? 0 })), p, { ...deps, transfers, onProgress: (n) => report(n, 'tracing wallets') });
     if (fwdSeeds.length && res.stats.failed === fwdSeeds.length && !res.stats.walletsTraced) throw new Error(`No recipient wallet could be read from the chain: ${[...res.nodes.values()].find((n) => n.error)?.error ?? 'unknown error'}`);
-    await relabelBusy(res);
 
     // Backward (source of funds). Seeds: (1) the on-chain sender of every case transaction, bounded by the time it was sent;
     // (2) every recipient wallet, bounded by its LAST payment time (what could have funded it by then). Senders first, at most MAX_SEEDS.
@@ -155,11 +124,9 @@ export class CaseAnalysisController implements OnModuleInit {
       const bseeds = [...all2.filter((x) => x.tag).slice(0, MAX_SEEDS / 2), ...all2.filter((x) => !x.tag)].slice(0, MAX_SEEDS); // senders cannot crowd out every recipient
       if (bseedAll.size > bseeds.length) notes.push(`Source tracing started from ${bseeds.length} of ${bseedAll.size} wallets (limit ${MAX_SEEDS}).`);
       if (bseeds.length) {
-        await porCheck(bseeds.filter((x) => x.tag === 'sender'), 'sender wallet(s)');
         await report(0, 'tracing sources');
         const left = Math.max(10, p.budgetSec - Math.round((Date.now() - started) / 1000)); // one budget for the whole run: sources get what the onward trace left
         back = await trace(bseeds, { ...p, budgetSec: left }, { ...deps, transfers, onProgress: (n) => report(res.stats.walletsTraced + n, 'tracing sources') }, 'backward');
-        await relabelBusy(back);
       } else notes.push('Source tracing skipped: the case has no verified sender or recipient wallet yet.');
     }
 
@@ -185,7 +152,7 @@ export class CaseAnalysisController implements OnModuleInit {
     const within = <T,>(p: Promise<T>) => timeout(p, 25_000); // one wallet's risk + balance may not stall the run
     const score = async (w: (typeof all)[number]) => {
       const n = res.nodes.get(nodeKey(w.chain, w.address)) ?? back?.nodes.get(nodeKey(w.chain, w.address));
-      const out: Record<string, unknown> = { ...w, role: roles.get(nodeKey(w.chain, w.address)) ?? null, traced: !!n?.expanded, stopReason: n?.stopReason ?? null, error: n?.error ?? null, balance: null, labels: n?.labels.map((l) => ({ name: l.name, category: l.category, source: l.source })) ?? [], risk: null };
+      const out: Record<string, unknown> = { ...w, role: roles.get(nodeKey(w.chain, w.address)) ?? null, traced: !!n?.expanded, stopReason: n?.stopReason ?? null, error: n?.error ?? null, balance: null, labels: n?.labels.map((l) => ({ name: l.name, category: l.category, source: l.source, sourceUrl: l.sourceUrl ?? null })) ?? [], risk: null };
       if (!n) out.risk = { score: null, level: null, reasons: [`Not traced: outside the wallets traced (limit ${MAX_SEEDS})`] };
       else if (Date.now() >= deadline) out.risk = { score: null, level: null, reasons: ['Not scored: the time budget ran out'] };
       else {
