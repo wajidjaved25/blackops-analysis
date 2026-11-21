@@ -12,6 +12,8 @@ import { DailyBars, RadialHeatmap } from '@/components/charts';
 import { Badge, Button, Card, CopyButton, DateTime, EmptyState, ErrorState, Field, Input, LinkButton, Notice, PageHeader, Segmented, Skeleton, SkeletonRows, Stat, Time } from '@/components/ui';
 import { useAuth } from '@/lib/auth';
 import { addrHref, Asset, AssetFilter, assetSym, Chain, chainName, chainQ, explorerAddr, money, num, resolveChain, TRON_USDC_NOTE } from '@/lib/format';
+import { api } from '@/lib/api';
+import { exchangeOf, labelText } from '@/lib/format';
 import { useApi } from '@/lib/hooks';
 
 interface Label { name: string; category: string; source?: string; confidence?: number }
@@ -49,7 +51,8 @@ export default function AddressPage() {
   const { data: d, loading, error, status, reload } = useApi<Addr>(valid ? `/address/${addr}?limit=${full ? 1000 : 200}&${q}` : null);
   const deep = useApi<Assessment>(valid ? `/risk/${addr}?${q}` : null);
   const full_labels = useApi<FullLabel[]>(valid ? `/labels/address/${addr}` : null);
-  const exLabel = useMemo(() => (full_labels.data ?? []).filter((l) => l.category === 'exchange').sort((a, b) => (SRC_RANK[a.source ?? ''] ?? 9) - (SRC_RANK[b.source ?? ''] ?? 9))[0], [full_labels.data]);
+  const inCases = useApi<{ caseId: number; title: string; role: string }[]>(valid ? `/address/${addr}/cases?${chainQ(chainHint)}` : null);
+  const exLabel = useMemo(() => (full_labels.data ?? []).filter((l) => l.category === 'exchange' || l.category === 'exchange_deposit').sort((a, b) => Number(a.category === 'exchange_deposit') - Number(b.category === 'exchange_deposit') || (SRC_RANK[a.source ?? ''] ?? 9) - (SRC_RANK[b.source ?? ''] ?? 9)).sort((a, b) => (SRC_RANK[a.source ?? ''] ?? 9) - (SRC_RANK[b.source ?? ''] ?? 9))[0], [full_labels.data]);
   const risk = deep.data ?? d?.risk;
   const [modal, setModal] = useState<'case' | 'watch' | 'label' | null>(null);
   const [dir, setDir] = useState<'all' | 'in' | 'out'>('all');
@@ -84,9 +87,12 @@ export default function AddressPage() {
           <AssetChips value={asset} onChange={(a) => setView(chainHint ?? 'eth', a)} />
           <span className="xs muted">USDT and USDC are both ≈ 1 USD, so mixed volumes are added and shown in USD.</span>
         </div>
-        {exLabel && <Notice tone="info"><span className="row" style={{ gap: 8 }}><b style={{ fontSize: 15 }}>{exLabel.name.replace(/\s*\(/, ' \u2014 ').replace(/\)$/, '')}</b><Badge tone={exLabel.source === 'official' ? 'good' : 'outline'}>{SRC_KIND(exLabel.source)}</Badge>{exLabel.source === 'statement' && <span className="xs muted">from a customer's exchange statement in a case, not a public list</span>}{exLabel.sourceUrl && <a href={exLabel.sourceUrl} target="_blank" rel="noreferrer noopener">source</a>}<span className="xs muted">Exchange wallets are where tracing stops.</span></span></Notice>}
+        {(inCases.data ?? []).length > 0 && <Notice tone="warn"><span className="row" style={{ gap: 8 }}>{inCases.data!.map((c) => <span key={c.caseId} className="row" style={{ gap: 6 }}><Badge tone={c.role === 'suspect' ? 'high' : 'info'}>{c.role}</Badge><a href={`/cases/${c.caseId}`}>case #{c.caseId}: {c.title}</a></span>)}</span></Notice>}
+        {exLabel && exLabel.category === 'exchange_deposit' && <Notice tone="info"><span className="row" style={{ gap: 8 }}><b style={{ fontSize: 15 }}>{labelText(exLabel.name, exLabel.category)}</b><Badge tone="outline">{SRC_KIND(exLabel.source)}</Badge>{exLabel.sourceUrl && <a href={exLabel.sourceUrl} target="_blank" rel="noreferrer noopener">source</a>}<span className="xs muted">This is an account at {exchangeOf(exLabel.name)}, not a {exchangeOf(exLabel.name)} wallet. Request account holder records (KYC) from {exchangeOf(exLabel.name)}; funds sent here end the trace.</span></span></Notice>}
+        {exLabel && exLabel.category === 'exchange' && <Notice tone="info"><span className="row" style={{ gap: 8 }}><b style={{ fontSize: 15 }}>{exLabel.name.replace(/\s*\(/, ' \u2014 ').replace(/\)$/, '')}</b><Badge tone={exLabel.source === 'official' ? 'good' : 'outline'}>{SRC_KIND(exLabel.source)}</Badge>{exLabel.source === 'statement' && <span className="xs muted">from a customer's exchange statement in a case, not a public list</span>}{exLabel.sourceUrl && <a href={exLabel.sourceUrl} target="_blank" rel="noreferrer noopener">source</a>}<span className="xs muted">Exchange wallets are where tracing stops.</span></span></Notice>}
         {!exLabel && d?.serviceScale && <Notice><b>Likely exchange/service (heuristic)</b>: this wallet's activity is at service scale (our index capped it or it has very many transfers). It is not a named label and does not affect the risk score.</Notice>}
         {chainHint === 'tron' && asset !== 'usdt' && <Notice>{TRON_USDC_NOTE}</Notice>}
+        {d && <OwnerGroups addr={addr} chain={chainHint} />}
 
         {loading && !d && (
           <div className="stack" role="status" aria-label="Loading address data">
@@ -201,5 +207,39 @@ export default function AddressPage() {
         {modal === 'label' && <AddLabelModal address={addr} onClose={() => setModal(null)} onDone={reload} />}
       </div>
     </RequirePerm>
+  );
+}
+
+interface Grp { kind: string; wallets: string[]; via: string | null; statement: string; evidence: { hash: string; chain: string; from: string; to: string; amount: number; at: number; note: string }[] }
+interface GrpRes { groups: Grp[]; partial: boolean; note: string; checked: number; bounds: { transfersPerWallet: number; extraWallets: number } }
+const GRP_TITLE: Record<string, string> = { common_funder: 'Funded by the same wallet', shared_deposit: 'Paid the same exchange customer account', round_trip: 'Funds went out and came back' };
+
+/** 9C: "Possibly same owner", on demand (it reads up to ~20 wallet histories, so it is not run on every page view). Heuristics with their evidence. */
+function OwnerGroups({ addr, chain }: { addr: string; chain: Chain | null }) {
+  const [res, setRes] = useState<GrpRes | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  async function run() {
+    setBusy(true); setErr('');
+    try { setRes(await api<GrpRes>(`/address/${addr}/groups${chainQ(chain) ? `?${chainQ(chain)}` : ''}`)); } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
+  }
+  return (
+    <Card title="Possibly same owner" actions={<Button sm busy={busy} onClick={run}>{res ? 'Run again' : 'Find related wallets'}</Button>}>
+      {!res && !err && <p className="muted small">Looks for wallets that may share an owner with this one: first funded by the same wallet, paying the same exchange customer account, or sending funds back and forth. Heuristics only, never proof.</p>}
+      {err && <p className="small" role="alert">{err}</p>}
+      {res && (res.groups.length === 0 ? <p className="muted small">No signals found in the {res.checked} wallet histories checked (up to {res.bounds.transfersPerWallet} transfers each){res.partial ? '; this wallet has more history than was read' : ''}.</p> : (
+        <div className="stack" style={{ gap: 12 }} data-testid="owner-groups">
+          {res.groups.map((g, i) => (
+            <div key={i}>
+              <b>{GRP_TITLE[g.kind] ?? g.kind}</b> <Badge tone="outline">heuristic</Badge>
+              <p className="small" style={{ margin: '4px 0' }}>{g.statement}</p>
+              <ul className="small" style={{ margin: 0, paddingLeft: 18 }}>{g.evidence.map((e, j) => <li key={j}>{e.note}: <TxLink hash={e.hash} chain={e.chain as Chain} /></li>)}</ul>
+              <div className="row small" style={{ gap: 6, marginTop: 4 }}>{g.wallets.map((w) => <AddressLink key={w} address={w} chain={chain ?? undefined} />)}</div>
+            </div>
+          ))}
+          <p className="xs muted">{res.note}</p>
+        </div>
+      ))}
+    </Card>
   );
 }

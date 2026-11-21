@@ -1,6 +1,6 @@
 'use client';
 import Link from 'next/link';
-import { addrHref, catColor, Level, short } from '@/lib/format';
+import { addrHref, catColor, labelText, Level, short } from '@/lib/format';
 import { Badge, CopyButton } from './ui';
 
 export const LEVEL_COLOR: Record<string, string> = { severe: 'var(--severe)', high: 'var(--high)', medium: 'var(--medium)', low: 'var(--low)' };
@@ -27,7 +27,7 @@ export function RiskGauge({ score, level }: { score: number; level: string }) {
 
 export function CategoryChip({ category, name }: { category?: string | null; name?: string }) {
   if (!category && !name) return null;
-  return <span className="chip" style={{ ['--c' as string]: catColor(category) }} title={category ?? undefined}>{name ?? category}{name && category && <span style={{ opacity: .7, fontWeight: 500 }}>· {category}</span>}</span>;
+  return <span className="chip" style={{ ['--c' as string]: catColor(category) }} title={name && category === 'exchange_deposit' ? name : category ?? undefined}>{name ? labelText(name, category) : category}{name && category && category !== 'exchange_deposit' && <span style={{ opacity: .7, fontWeight: 500 }}>· {category}</span>}</span>;
 }
 
 export function AddressLink({ address, label, full, href, noCopy, chain }: { address: string; label?: { name: string; category: string } | null; full?: boolean; href?: string; noCopy?: boolean; chain?: string }) {

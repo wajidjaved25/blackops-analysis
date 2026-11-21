@@ -14,7 +14,8 @@ import { num } from '@/lib/format';
 import { useApi, useDebounced } from '@/lib/hooks';
 
 interface Label { id: number; orgId: number; chain: string; address: string; name: string; category: string; source: string; sourceUrl?: string | null; confidence?: number; createdAt: string }
-interface St { counts: Record<string, number>; ofacLastSync?: string; tetherLastSync?: string; circleLastSync?: string; etherscanKey?: boolean; categories: string[] }
+interface ExList { exchange: string; snapshot: string | null; url: string | null; checkedAt: number | null; syncedAt: number | null; status: 'ok' | 'error' | 'never'; error?: string; counts?: Record<string, number>; removed?: number }
+interface St { exchangeLists?: ExList[]; counts: Record<string, number>; ofacLastSync?: string; tetherLastSync?: string; circleLastSync?: string; etherscanKey?: boolean; categories: string[] }
 const EXCHANGES = ['Binance', 'OKX', 'Bybit', 'KuCoin', 'Bitget', 'HTX', 'Gate', 'Kraken', 'Coinbase'];
 // 8C source badges: official (vendor page) / explorer (Tronscan, Etherscan tags) / cluster (deposit attribution) / heuristic (not stored as a label).
 const sourceKind = (s: string) => (s === 'official' ? 'official' : s === 'tronscan' || s === 'etherscan' ? 'explorer' : s === 'cluster' ? 'cluster' : s === 'statement' ? 'statement' : s);
@@ -63,6 +64,16 @@ export default function Labels() {
           <SyncCard s="circle" title="Circle blacklisted wallets (USDC)" last={st.data?.circleLastSync} />
           <Stat label="Manual · import · cluster" value={st.data ? `${num(st.data.counts.manual ?? 0)} · ${num(st.data.counts.import ?? 0)} · ${num(st.data.counts.cluster ?? 0)}` : '…'} sub={st.data && !st.data.etherscanKey ? 'Etherscan key not set: ERC20 data limited' : undefined} />
         </div>
+        <Card title="Exchange wallet lists (exchange-owned hot/cold wallets)" actions={<Button sm busy={sync === 'lists'} disabled={!canSync || !!sync} title={canSync ? '' : 'Requires labels.sync'} onClick={async () => { setSync('lists'); try { await api('/labels/exchange-lists/sync', { body: {} }); toast.success('Update check finished'); st.reload(); list.reload(); } catch (e) { toast.error((e as Error).message); } finally { setSync(''); } }}><RefreshCw size={14} />Check now</Button>}>
+          <p className="muted small" style={{ marginTop: 0 }}>Wallets the exchanges themselves publish. They are checked once a day and downloaded only when a newer snapshot exists. Customer deposit addresses are never stored from these lists (Binance's ~10 million deposit rows are checked on demand instead).</p>
+          <Table caption="Exchange wallet lists" rows={st.data?.exchangeLists ?? []} rowKey={(l) => l.exchange} pageSize={10} cols={[
+            { key: 'e', header: 'Exchange', cell: (l) => <b>{l.exchange}</b> },
+            { key: 's', header: 'Snapshot', cell: (l) => (l.snapshot ? <span className="small mono" title={l.snapshot}>{l.snapshot.length > 24 ? l.snapshot.replace(/^(W\/)?"/, '').slice(0, 12) + '…' : l.snapshot}</span> : '—') },
+            { key: 'c', header: 'Wallets', cell: (l) => (l.counts ? Object.entries(l.counts).map(([c, n]) => `${c} ${n}`).join(' · ') : '—') },
+            { key: 'k', header: 'Last check', cell: (l) => (l.checkedAt ? <Time t={new Date(l.checkedAt).toISOString()} /> : 'never') },
+            { key: 't', header: 'Status', wrap: true, cell: (l) => <span className="row" style={{ gap: 6 }}><Badge tone={l.status === 'ok' ? 'good' : l.status === 'error' ? 'severe' : 'outline'}>{l.status}</Badge>{l.error && <span className="xs muted">{l.error}</span>}{l.url && <a href={l.url} target="_blank" rel="noreferrer noopener">list file</a>}</span> },
+          ]} />
+        </Card>
         <Card flush title={<span className="row">
           <span style={{ position: 'relative' }}><Search size={14} style={{ position: 'absolute', left: 10, top: 8, color: 'var(--faint)' }} aria-hidden /><Input sm style={{ paddingLeft: 30, width: 240 }} placeholder="Search name or address" aria-label="Search labels" value={q} onChange={(e) => { setQ(e.target.value); setPage(0); }} /></span>
           <Select sm style={{ width: 150 }} aria-label="Category" value={cat} onChange={(e) => { setCat(e.target.value); setPage(0); }}><option value="">All categories</option>{(st.data?.categories ?? []).map((c) => <option key={c}>{c}</option>)}</Select>

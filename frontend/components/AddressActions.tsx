@@ -90,7 +90,7 @@ export function WatchModal({ address, chain, onClose }: { address: string; chain
 export function AddLabelModal({ address, onClose, onDone }: { address?: string; onClose: () => void; onDone?: () => void }) {
   const toast = useToast();
   const st = useApi<{ categories: string[] }>('/labels/status');
-  const cats = st.data?.categories ?? ['sanctioned', 'frozen', 'ransomware', 'darknet', 'terrorism', 'scam', 'fraud', 'mixer', 'gambling', 'other', 'exchange', 'service', 'bridge', 'dex'];
+  const cats = st.data?.categories ?? ['sanctioned', 'frozen', 'ransomware', 'darknet', 'terrorism', 'scam', 'fraud', 'mixer', 'gambling', 'other', 'exchange', 'exchange_deposit', 'service', 'bridge', 'dex'];
   const [f, setF] = useState({ address: address ?? '', name: '', category: 'other', chain: '' });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');

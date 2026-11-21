@@ -1,7 +1,7 @@
 // Case analysis (Phase 8B), pure part: bounded onward trace, pattern rules, path extraction, aggregation. No network, no database: see selfcheck.ts.
 // plan.md rules 4 and 5: every finding carries its evidence rows and the plain-English reason; nothing is inferred without saying it is an inference.
 import { norm, Transfer } from './chains';
-import { depositEvidence } from './cluster';
+import { depositEvidence, exchangeName } from './cluster';
 import type { LabelLite } from './labels';
 import { WEIGHTS } from './risk-score';
 
@@ -124,7 +124,7 @@ export function internalTransfers(rows: Row[]): Finding[] {
 
 // ---------------- onward trace ----------------
 
-export type Stop = 'exchange' | 'service' | 'bridge' | 'dex' | 'risk' | 'deposit' | 'busy';
+export type Stop = 'exchange' | 'exchange_deposit' | 'service' | 'bridge' | 'dex' | 'risk' | 'deposit' | 'busy';
 export const BUSY_REASON = 'high-activity wallet (likely exchange/service) — not traced further';
 export interface Via {
   amount: number;
@@ -183,9 +183,16 @@ export const nodeKey = (chain: string, address: string) => `${chain}|${norm(addr
 const CONCURRENCY = 4;
 
 /** What a label means for following the money: exchanges/services/bridges/dex end the trace; anything with a risk weight ends it too and is reported. 'other' (weight 20) does not. */
+/** 9C: a case suspect/seed that is a customer account at an exchange is still traced as a seed (the trace starts there); only onward wallets end at it. */
+const seedStop = (hop: number, s: Stop | null): Stop | null => (hop === 0 && s === 'exchange_deposit' ? null : s);
+export const customerStopReason = (labels: LabelLite[]) => {
+  const l = labels.find((x) => x.category === 'exchange_deposit');
+  const ex = l ? exchangeName(l.name) : 'the exchange';
+  return `funds entered a ${ex} customer account — request account holder records from ${ex}`;
+};
 export function stopOf(labels: LabelLite[]): Stop | null {
   if (labels.some((l) => (WEIGHTS[l.category] ?? 0) >= 40 || l.category === 'frozen')) return 'risk';
-  for (const c of ['exchange', 'service', 'bridge', 'dex'] as const) if (labels.some((l) => l.category === c)) return c;
+  for (const c of ['exchange', 'exchange_deposit', 'service', 'bridge', 'dex'] as const) if (labels.some((l) => l.category === c)) return c;
   return null;
 }
 
@@ -202,7 +209,7 @@ export async function trace(seeds: { chain: string; address: string; after: numb
   const histories = new Map<string, Transfer[]>();
   const stats: TraceStats = { walletsTotal: 0, walletsTraced: 0, failed: 0, notFollowed: 0, hopLimit: false, fanoutCut: 0, walletCap: false, timedOut: false };
   const fresh = (chain: string, address: string, hop: number, parent: string | null, via: Via | null, after: number, labels: LabelLite[]): TraceNode => ({
-    key: nodeKey(chain, address), chain, address: norm(address), hop, parent, via, after, labels, stop: stopOf(labels), deposit: null, expanded: false, omitted: 0,
+    key: nodeKey(chain, address), chain, address: norm(address), hop, parent, via, after, labels, stop: seedStop(hop, stopOf(labels)), deposit: null, expanded: false, omitted: 0,
   });
   const markBusy = async (chain: string, list: TraceNode[]) => {
     const open = list.filter((x) => !x.stop);
@@ -210,7 +217,7 @@ export async function trace(seeds: { chain: string; address: string; after: numb
     for (const x of open) if (capped.has(norm(x.address))) Object.assign(x, { stop: 'busy', stopReason: BUSY_REASON });
   };
   const withReason = (x: TraceNode) => {
-    if (x.stop && !x.stopReason) x.stopReason = x.stop === 'risk' ? 'labelled high-risk wallet' : `labelled ${x.stop} wallet: endpoint, not traced further`;
+    if (x.stop && !x.stopReason) x.stopReason = x.stop === 'risk' ? 'labelled high-risk wallet' : x.stop === 'exchange_deposit' ? customerStopReason(x.labels) : `labelled ${x.stop} wallet: endpoint, not traced further`;
     return x;
   };
   for (const chain of new Set(seeds.map((s) => s.chain))) {
@@ -351,14 +358,20 @@ export function exposureFindings(nodes: Map<string, TraceNode>): Finding[] {
   return out;
 }
 
-/** Funds that reached a labelled exchange, or an inferred deposit address of one: who to send legal process to. One finding per exchange. */
+/**
+ * Funds that reached a labelled exchange (its OWN wallet) or a customer account at one (deposit address): who to send legal process to.
+ * One finding per exchange and kind; the wording never calls a customer deposit address "the exchange".
+ */
 export function exchangeFindings(nodes: Map<string, TraceNode>): Finding[] {
-  const by = new Map<string, { name: string; ends: TraceNode[] }>();
+  const by = new Map<string, { name: string; customer: boolean; ends: TraceNode[] }>();
   for (const n of nodes.values()) {
-    const l = n.labels.find((x) => x.category === 'exchange');
-    if (n.stop !== 'exchange' || !l) continue; // a deposit node continues to its hot wallet, which is the endpoint
-    const e = by.get(l.name) ?? { name: l.name, ends: [] };
-    by.set(l.name, { ...e, ends: [...e.ends, n] });
+    const customer = n.stop === 'exchange_deposit';
+    const l = n.labels.find((x) => x.category === (customer ? 'exchange_deposit' : 'exchange'));
+    if ((n.stop !== 'exchange' && !customer) || !l || (customer && n.hop === 0)) continue; // a deposit node continues to its hot wallet, which is the endpoint
+    const name = exchangeName(l.name);
+    const k = `${customer ? 'c' : 'e'}|${customer ? name : l.name}`;
+    const e = by.get(k) ?? { name: customer ? name : l.name, customer, ends: [] };
+    by.set(k, { ...e, ends: [...e.ends, n] });
   }
   return [...by.values()].map((e) => {
     const paths = e.ends.map((n) => pathTo(nodes, n.key));
@@ -367,8 +380,14 @@ export function exchangeFindings(nodes: Map<string, TraceNode>): Finding[] {
     const direct = paths.filter((p) => p.length === 1).length; // the statement itself pays a wallet labelled as this exchange
     const total = paths.reduce((s, p) => s + (p[p.length - 1].via?.amount ?? 0), 0);
     const first = pathText(paths.find((p) => p.length > 1) ?? paths[0]);
-    return mk('exchange_endpoint', 'medium', `Funds reached ${e.name}`,
-      `${paths.length} path${paths.length === 1 ? '' : 's'} from the case recipients end at ${e.name}${direct ? ` (${direct} of them: the statement pays a wallet labelled ${e.name} directly)` : ''}${total > 0 ? `; ${usd(total)} USD-equivalent was sent to the exchange wallet by the previous wallet on the onward paths (not necessarily case funds only)` : ''}. Example: ${first}. Who to contact: ${e.name} holds the account behind ${paths.length === 1 ? 'this deposit' : 'these deposits'}; send legal process or a records request to ${e.name}${inferred ? '. Part of this relies on an inferred deposit address (heuristic): confirm it with the exchange' : ''}${clustered ? '. A deposit address came from an accepted cluster suggestion (heuristic, confidence set by a reviewer)' : ''}.`,
+    const many = paths.length === 1 ? 'this deposit' : 'these deposits';
+    const flag = `${inferred ? '. Part of this relies on an inferred deposit address (heuristic): confirm it with the exchange' : ''}${clustered ? '. A deposit address came from an accepted cluster suggestion (heuristic, confidence set by a reviewer)' : ''}.`;
+    if (e.customer)
+      return mk('exchange_customer_endpoint', 'medium', `Funds reached a ${e.name} customer account (deposit address)`,
+        `${paths.length} path${paths.length === 1 ? '' : 's'} from the case recipients end at a deposit address of a ${e.name} customer${total > 0 ? `; ${usd(total)} USD-equivalent was sent there by the previous wallet on the onward paths (not necessarily case funds only)` : ''}. This is a customer account at ${e.name}, not a ${e.name} wallet. Example: ${first}. Who to contact: ${e.name} holds the account holder's identity records behind ${many}; request account holder records (KYC) from ${e.name} through legal process${flag}`,
+        paths.flatMap((p) => pathEvidence(p)));
+    return mk('exchange_endpoint', 'medium', `Funds reached ${e.name} (exchange wallet)`,
+      `${paths.length} path${paths.length === 1 ? '' : 's'} from the case recipients end at ${e.name}, an exchange-owned wallet${direct ? ` (${direct} of them: the statement pays a wallet labelled ${e.name} directly)` : ''}${total > 0 ? `; ${usd(total)} USD-equivalent was sent to the exchange wallet by the previous wallet on the onward paths (not necessarily case funds only)` : ''}. Example: ${first}. Who to contact: ${e.name} holds the account behind ${many}; send legal process or a records request to ${e.name}${flag}`,
       paths.flatMap((p) => pathEvidence(p)));
   });
 }
@@ -491,7 +510,7 @@ export function totals(rows: Row[]) {
   return { rows: rows.length, claimed: sum(() => true), verified: sum((r) => r.status === 'verified'), offChain: { count: rows.filter((r) => r.offChain).length, amount: sum((r) => r.offChain) }, byStatus };
 }
 
-export interface ChartNode { id: string; label: string; kind: 'source' | 'offchain' | 'recipient' | 'onward' | 'busy' | 'exchange' | 'risk' | 'deposit' | 'bridge' | 'dex' | 'service'; chain?: string; address?: string; category?: string; hop?: number }
+export interface ChartNode { id: string; label: string; kind: 'source' | 'offchain' | 'recipient' | 'onward' | 'busy' | 'exchange' | 'exchange_deposit' | 'risk' | 'deposit' | 'bridge' | 'dex' | 'service'; chain?: string; address?: string; category?: string; hop?: number }
 export interface ChartEdge { id: string; source: string; target: string; amount: number; count: number }
 /** Link chart: statement -> recipients -> onward hops -> endpoints. Node count is bounded by MAX_SEEDS + maxWallets + 2. */
 export function linkChart(wallets: WalletRow[], res: TraceResult, offChain: { count: number; amount: number }): { nodes: ChartNode[]; edges: ChartEdge[] } {

@@ -133,6 +133,15 @@ export class CasesController {
     mkdirSync(UPLOAD_DIR, { recursive: true });
   }
 
+  /** 9C: the roles this address has in the organisation's cases (suspect, victim, ...). The address page shows them before any label. */
+  @Perm('cases.view')
+  @Get('address/:addr/cases')
+  async casesOf(@CurrentCtx() ctx: Ctx, @Param('addr') addr: string, @Query('chain') chain?: string) {
+    const p = parseAddr(addr, chain);
+    const rows = await this.db.caseAddress.findMany({ where: { chain: p.chain, address: p.addr, case: { orgId: ctx.orgId } }, select: { role: true, caseId: true, case: { select: { title: true, status: true } } }, orderBy: { id: 'asc' }, take: 20 });
+    return rows.map((r) => ({ caseId: r.caseId, title: r.case.title, status: r.case.status, role: r.role }));
+  }
+
   // ----- cases -----
   @Perm('cases.view')
   @Get('cases')
