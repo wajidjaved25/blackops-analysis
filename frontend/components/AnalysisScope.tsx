@@ -8,8 +8,9 @@ import { useDebounced } from '@/lib/hooks';
 export interface ScopeForm {
   choose: boolean; selectedIds: number[] | null; from: string; to: string; tz: string; statuses: string[]; chains: string[]; assets: string[]; fileIds: number[]; pasted: boolean;
   wallets: string[]; min: string; max: string; direction: '' | 'withdrawal' | 'deposit';
+  savedId: number | null; // the saved scope last applied (10C); only trusted while the form still equals it
 }
-export const EMPTY_SCOPE: ScopeForm = { choose: false, selectedIds: null, from: '', to: '', tz: '', statuses: [], chains: [], assets: [], fileIds: [], pasted: false, wallets: [], min: '', max: '', direction: '' };
+export const EMPTY_SCOPE: ScopeForm = { choose: false, selectedIds: null, from: '', to: '', tz: '', statuses: [], chains: [], assets: [], fileIds: [], pasted: false, wallets: [], min: '', max: '', direction: '', savedId: null };
 export interface ScopePreview {
   inScope: number; total: number; summary: string; undatedExcluded: number;
   facets: { statuses: Record<string, number>; chains: Record<string, number>; assets: Record<string, number>; files: { id: number; name: string; count: number }[]; pasted: number; wallets: { address: string; count: number }[]; walletsTotal: number };
@@ -68,7 +69,7 @@ function Checks<T extends string | number>({ label, options, value, onChange }: 
   );
 }
 
-export function ScopeSection({ caseId, f, setF, preview, disabled }: { caseId: string; f: ScopeForm; setF: (f: ScopeForm) => void; preview: ReturnType<typeof useScopePreview>; disabled?: boolean }) {
+export function ScopeSection({ caseId, f, setF, preview, disabled, saved }: { caseId: string; f: ScopeForm; setF: (f: ScopeForm) => void; preview: ReturnType<typeof useScopePreview>; disabled?: boolean; saved?: React.ReactNode }) {
   const [q, setQ] = useState('');
   const p = preview.data;
   const fx = p?.facets;
@@ -84,6 +85,7 @@ export function ScopeSection({ caseId, f, setF, preview, disabled }: { caseId: s
           {preview.error ? <span style={{ color: 'var(--high)' }}>{preview.error}</span> : p ? <><b>{p.inScope}</b> of {p.total} transactions will be analysed</> : 'Counting…'}
         </span>
       </div>
+      {saved}
       {f.choose && f.selectedIds && (
         <Notice tone="info" action={<Button sm onClick={() => set({ selectedIds: null })}>Use filters instead</Button>}>
           <b>{f.selectedIds.length}</b> transaction{f.selectedIds.length === 1 ? '' : 's'} chosen on the Transactions tab. Only these are analysed.

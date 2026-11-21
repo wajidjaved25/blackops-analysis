@@ -2,7 +2,7 @@
 import { BadRequestException, Body, ConflictException, Controller, Get, NotFoundException, OnModuleInit, Param, Post } from '@nestjs/common';
 import { CaseAnalysis } from '@prisma/client';
 import { CurrentCtx, Perm } from './auth';
-import { assertNotEmpty, assertSelectedInCase, describeScope, filterScope, parseScope, Scope } from './case-scope';
+import { applySavedScope, assertNotEmpty, assertSelectedInCase, describeRunScope, filterScope, parseScope, Scope } from './case-scope';
 import { CasesService } from './cases';
 import { Chain, getBalances, getTransfers, norm } from './chains';
 import { BinancePor } from './binance-por';
@@ -57,9 +57,10 @@ const boundsHit = (s: TraceStats, p: Params) => [
 ].filter(Boolean) as string[];
 
 /** The scope stored in a run's params, in words (old runs have none: all transactions). */
+const savedName = (params: unknown) => { const n = (params as Record<string, unknown> | null)?.scopeName; return typeof n === 'string' ? n : null; };
 const scopeLine = (params: unknown) => {
   try {
-    return describeScope(parseScope((params as Record<string, unknown>)?.scope));
+    return describeRunScope(parseScope((params as Record<string, unknown>)?.scope), savedName(params));
   } catch {
     return 'Scope: unreadable';
   }
@@ -254,7 +255,7 @@ export class CaseAnalysisController implements OnModuleInit {
     const dateless = p.scope && (p.scope.from || p.scope.to) ? filterScope(everything, { ...p.scope, from: undefined, to: undefined }).filter((t) => !(t.claimedAt ?? t.onAt)).length : 0;
     return {
       version: 1, params: p,
-      scope: { applied: p.scope ?? null, summary: describeScope(p.scope ?? null), inScope: txs.length, total: everything.length, ...(dateless ? { undatedExcluded: dateless } : {}) }, bounds: { hops: p.hops, fanout: p.fanout, maxWallets: p.maxWallets, maxSeeds: MAX_SEEDS, budgetSec: p.budgetSec, busyTransfers: p.busyTransfers },
+      scope: { applied: p.scope ?? null, summary: describeRunScope(p.scope ?? null, savedName(a.params)), ...(savedName(a.params) ? { savedName: savedName(a.params) } : {}), inScope: txs.length, total: everything.length, ...(dateless ? { undatedExcluded: dateless } : {}) }, bounds: { hops: p.hops, fanout: p.fanout, maxWallets: p.maxWallets, maxSeeds: MAX_SEEDS, budgetSec: p.budgetSec, busyTransfers: p.busyTransfers },
       totals: { ...t, onChain: { count: onchain.length, amount: onchain.reduce((x, r) => x + r.amount, 0) }, wallets: all.length },
       wallets,
       trace: { ...s, seedsTotal: all.length, seedsTraced: seeds.filter((w) => (res.nodes.get(nodeKey(w.chain, w.address)) ?? back?.nodes.get(nodeKey(w.chain, w.address)))?.expanded).length, hit, partial: hit.length > 0 || backHit.length > 0 || all.length > seeds.length, durationMs: Date.now() - started },
@@ -272,7 +273,12 @@ export class CaseAnalysisController implements OnModuleInit {
   @Post('cases/:id/analyses')
   async run(@CurrentCtx() ctx: Ctx, @Param('id') raw: string, @Body() b: Record<string, unknown>) {
     const c = await this.cases.own(ctx, raw);
-    const params = parseParams(b ?? {});
+    let params: Params = parseParams(b ?? {});
+    if (b?.scopeId !== undefined && b.scopeId !== null) {
+      if (b.scope !== undefined && b.scope !== null) throw new BadRequestException('Send either scope or scopeId, not both');
+      const saved = found(await this.db.caseScope.findFirst({ where: { id: id(b.scopeId), caseId: c.id } }), 'Saved scope not found'); // a scope of another case (or org) is a 404
+      params = applySavedScope(params, saved) as Params; // the run keeps a copy: later edits to the saved scope do not change it
+    }
     if (!(await this.db.caseTransaction.count({ where: { caseId: c.id } }))) throw new BadRequestException('Add transactions (paste hashes or import a statement) before running an analysis');
     await this.checkedScope(c.id, params.scope ?? null);
     if (await this.db.caseAnalysis.findFirst({ where: { caseId: c.id, status: { in: ACTIVE } }, select: { id: true } })) throw new ConflictException('An analysis is already running for this case');
@@ -300,7 +306,7 @@ export class CaseAnalysisController implements OnModuleInit {
     const perFile = count((t) => t.fileId);
     const wallets = [...count((t) => t.address ?? t.onTo)].sort((x, y) => y[1] - x[1]).slice(0, 200);
     return {
-      inScope: txs.length, total: everything.length, summary: describeScope(scope),
+      inScope: txs.length, total: everything.length, summary: describeRunScope(scope),
       undatedExcluded: scope && (scope.from || scope.to) ? filterScope(everything, { ...scope, mode: 'all', from: undefined, to: undefined }).filter((t) => !(t.claimedAt ?? t.onAt)).length : 0,
       facets: {
         statuses: Object.fromEntries(count((t) => t.status)), chains: Object.fromEntries(count((t) => t.chain)), assets: Object.fromEntries(count((t) => (t.coin ?? t.onAsset ?? 'USDT').toUpperCase())),

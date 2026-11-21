@@ -19,7 +19,7 @@ import { boundedMap, graphAddresses, graphStats, pickSources, timelineHops } fro
 import { base32, newRecoveryCodes, openSecret, recoveryHash, sealSecret, totp, unbase32, verifyTotp } from './totp';
 import { detectFormat, exchangeOfFormat, headerTz, matchTx, networkChain, normalizeRows, offChainDepositAddresses, parseTime, statementDepositLabels, tzMinutes } from './statements';
 import { readGrid } from './case-tx';
-import { assertNotEmpty, assertSelectedInCase, describeScope, filterScope, parseScope, rowDirection, ScopeTx } from './case-scope';
+import { applySavedScope, assertNameFree, assertNotEmpty, assertSelectedInCase, describeRunScope, describeScope, filterScope, parseSavedScope, parseScope, parseScopeDescription, parseScopeName, rowDirection, ScopeTx } from './case-scope';
 import { parseParams } from './case-analysis';
 import ExcelJS from 'exceljs';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -934,6 +934,41 @@ ${PE1}`, 2).length, 2); // cap
     assert.equal(describeScope(parseScope({ mode: 'selected', transactionIds: [1] })), 'Scope: 1 selected transaction');
     assert.equal(describeScope(parseScope({ statuses: ['verified'], from: '2026-02-28T19:00:00Z', to: '2026-06-30T18:59:59Z', tzMin: 300, wallets: ['TA', 'TB'] })), 'Scope: verified only, 2026-03-01 → 2026-06-30 (UTC+5), 2 wallets');
     assert.equal(describeScope(parseScope({ statuses: ['not_found', 'error'], direction: 'deposit', minAmount: 10 })), 'Scope: not found or error only, amount ≥ 10, deposits only');
+  }
+
+  // --- 10C: saved scopes ---
+  {
+    // names: required, trimmed, max 80; description optional, max 500
+    assert.equal(parseScopeName('  Night withdrawals '), 'Night withdrawals');
+    for (const bad of [undefined, '', '   ', 7, 'x'.repeat(81)]) assert.throws(() => parseScopeName(bad), /./, String(bad).slice(0, 10));
+    assert.equal(parseScopeName('x'.repeat(80)).length, 80);
+    assert.equal(parseScopeDescription(undefined), '');
+    assert.throws(() => parseScopeDescription('x'.repeat(501)));
+    // uniqueness per case, case-insensitive; a rename to its own name is checked against the OTHER scopes only
+    assert.throws(() => assertNameFree('night withdrawals', ['Night Withdrawals', 'Big']), (e: Error) => /already exists/.test(e.message) && (e as { getStatus?: () => number }).getStatus?.() === 409);
+    assert.doesNotThrow(() => assertNameFree('Night withdrawals', ['Big']));
+    // the saved scope is exactly the validated shape; "all transactions" is refused; foreign ids are refused at the same checkpoint as runs
+    assert.deepEqual(parseSavedScope({ statuses: ['verified'], tzMin: 300 }), { mode: 'all', statuses: ['verified'], tzMin: 300 });
+    assert.throws(() => parseSavedScope({}), /nothing to save/);
+    assert.throws(() => parseSavedScope({ mode: 'selected', transactionIds: [] }));
+    assert.throws(() => parseSavedScope({ statuses: ['nope'] }));
+    assert.throws(() => assertSelectedInCase(parseSavedScope({ mode: 'selected', transactionIds: [1, 500] }).transactionIds!, new Set([1, 2])), /1 selected transaction does not belong to this case/);
+    // scopeId resolution: the run's params carry a COPY of the scope plus the name
+    const saved = { id: 9, name: 'Night withdrawals', scope: { mode: 'all', statuses: ['verified'], direction: 'withdrawal' } };
+    const run = applySavedScope(parseParams({ hops: 1 }), saved);
+    assert.deepEqual(run.scope, { mode: 'all', statuses: ['verified'], direction: 'withdrawal' });
+    assert.equal(run.scopeId, 9);
+    assert.equal(run.scopeName, 'Night withdrawals');
+    assert.equal(parseParams({ scopeName: 'spoof', scopeId: 3 }).scopeName, undefined); // a client cannot name a scope it did not save
+    // past runs are immutable: later edits to the saved scope (rename, new filters, deletion) do not touch the stored params
+    const stored = JSON.parse(JSON.stringify(run));
+    saved.name = 'Renamed'; (saved.scope as { statuses: string[] }).statuses.push('error'); (saved.scope as { direction?: string }).direction = undefined;
+    assert.deepEqual(stored.scope, { mode: 'all', statuses: ['verified'], direction: 'withdrawal' });
+    assert.equal(stored.scopeName, 'Night withdrawals');
+    assert.deepEqual(run.scope, { mode: 'all', statuses: ['verified'], direction: 'withdrawal' }); // not even the in-memory copy shares references
+    // summary line names the saved scope; unsaved scopes read as before
+    assert.equal(describeRunScope(parseScope({ statuses: ['verified'] }), 'Night withdrawals'), 'Scope: Night withdrawals (saved): verified only');
+    assert.equal(describeRunScope(parseScope({ statuses: ['verified'] })), 'Scope: verified only');
   }
 
   console.log('selfcheck: all passed');

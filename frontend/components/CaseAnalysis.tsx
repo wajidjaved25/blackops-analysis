@@ -4,6 +4,7 @@ import { AlertTriangle, ChevronDown, FolderPlus, Play } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AiPanel } from '@/components/AiPanel';
 import { buildScope, EMPTY_SCOPE, ResultScope, ScopeForm, ScopeSection, useScopePreview } from '@/components/AnalysisScope';
+import { SavedScopesBar, savedMatch, useSavedScopes } from '@/components/SavedScopes';
 import { ROLES } from '@/components/AddressActions';
 import { RadialHeatmap } from '@/components/charts';
 import { AddressLink, RiskBadge, TxLink } from '@/components/Risk';
@@ -294,6 +295,8 @@ export function AnalysisTab({ id, onAdded, preset, onPresetUsed }: { id: string;
   useEffect(() => { if (preset?.length) { setScope({ ...EMPTY_SCOPE, choose: true, selectedIds: preset }); onPresetUsed?.(); } }, [preset]); // eslint-disable-line react-hooks/exhaustive-deps
   const scopeBody = buildScope(scope);
   const preview = useScopePreview(id, scopeBody);
+  const savedList = useSavedScopes(id);
+  const savedHit = savedMatch(scope, savedList.data);
   const runs = list.data ?? [];
   const active = runs.find((a) => a.status === 'queued' || a.status === 'running');
   const shown = runs.find((a) => a.id === pick) ?? runs[0];
@@ -305,7 +308,7 @@ export function AnalysisTab({ id, onAdded, preset, onPresetUsed }: { id: string;
   async function run() {
     setBusy(true);
     try {
-      const body = { hops: Number(f.hops), fanout: Number(f.fanout), maxWallets: Number(f.maxWallets), budgetSec: Number(f.budgetSec), thresholds: f.thresholds, tzMin: Math.round(Number(f.tz) * 60), direction: f.direction, ...(scopeBody ? { scope: scopeBody } : {}) };
+      const body = { hops: Number(f.hops), fanout: Number(f.fanout), maxWallets: Number(f.maxWallets), budgetSec: Number(f.budgetSec), thresholds: f.thresholds, tzMin: Math.round(Number(f.tz) * 60), direction: f.direction, ...(savedHit ? { scopeId: savedHit.id } : scopeBody ? { scope: scopeBody } : {}) };
       const a = await api<Analysis>(`/cases/${id}/analyses`, { body });
       setPick(a.id); list.reload(); toast.success('Analysis started');
     } catch (e) { toast.error((e as Error).message); } finally { setBusy(false); }
@@ -322,7 +325,7 @@ export function AnalysisTab({ id, onAdded, preset, onPresetUsed }: { id: string;
         </Select>)}>
         <div className="stack">
           <p className="small muted" style={{ margin: 0 }}>Follows the money onward from every recipient wallet in the case and, backwards, to where it came from (sender of each transaction and recipient wallets), within the bounds below, then applies pattern rules. Everything is bounded so the free chain API is not flooded: results state what was and was not traced. Exchanges, services, bridges and high-activity wallets end a trace and are shown as endpoints.</p>
-          <ScopeSection caseId={id} f={scope} setF={setScope} preview={preview} disabled={!manage} />
+          <ScopeSection caseId={id} f={scope} setF={setScope} preview={preview} disabled={!manage} saved={<SavedScopesBar caseId={id} f={scope} setF={setScope} list={savedList} reload={savedList.reload} manage={manage} summary={preview.data?.summary ?? ''} />} />
           <div className="row" style={{ gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
             <Field label="Direction"><Select aria-label="Direction" style={{ width: 190 }} value={f.direction} onChange={(e) => setF({ ...f, direction: e.target.value })}><option value="both">Both (onward and sources)</option><option value="forward">Onward only</option><option value="backward">Sources only</option></Select></Field>
             <Field label="Hops (1 to 3)"><Select aria-label="Hops" style={{ width: 90 }} value={f.hops} onChange={(e) => setF({ ...f, hops: e.target.value })}>{[1, 2, 3].map((n) => <option key={n}>{n}</option>)}</Select></Field>

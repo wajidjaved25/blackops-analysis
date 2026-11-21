@@ -1,9 +1,10 @@
 'use client';
-import { Download, FileSpreadsheet, ListPlus, Microscope, RefreshCw, Trash2, Upload } from 'lucide-react';
+import { Bookmark, Download, FileSpreadsheet, ListPlus, Microscope, RefreshCw, Trash2, Upload } from 'lucide-react';
 import { useState } from 'react';
 import { ROLES } from '@/components/AddressActions';
 import { ConfirmDialog, Modal } from '@/components/Modal';
 import { AddressLink, TxLink } from '@/components/Risk';
+import { SaveScopeDialog } from '@/components/SavedScopes';
 import { Table } from '@/components/Table';
 import { useToast } from '@/components/Toast';
 import { Badge, Button, Card, DateTime, EmptyState, ErrorState, Field, Input, Notice, Segmented, Select, SkeletonRows, Textarea } from '@/components/ui';
@@ -38,7 +39,7 @@ export function TransactionsTab({ id, onAnalyse }: { id: string; onAnalyse?: (id
   const [q, setQ] = useState('');
   const dq = useDebounced(q);
   const [limit, setLimit] = useState(PAGE);
-  const [modal, setModal] = useState<'paste' | 'import' | null>(null);
+  const [modal, setModal] = useState<'paste' | 'import' | 'scope' | null>(null);
   const [del, setDel] = useState<Tx | null>(null);
   const [sel, setSel] = useState<Set<string | number>>(new Set());
   const path = `/cases/${id}/transactions?limit=${limit}${status ? `&status=${status}` : ''}${dq ? `&q=${encodeURIComponent(dq)}` : ''}`;
@@ -94,6 +95,7 @@ export function TransactionsTab({ id, onAnalyse }: { id: string; onAnalyse?: (id
           <div className="row" style={{ gap: 8, flexWrap: 'wrap', padding: '8px 12px' }} data-testid="selection-bar">
             <span className="small" aria-live="polite"><b>{ids.length}</b> selected</span>
             <Button sm variant="primary" disabled={!ids.length || ids.length > MAX_SELECTED} title={ids.length > MAX_SELECTED ? `At most ${MAX_SELECTED} transactions` : ''} onClick={() => onAnalyse?.(ids)}><Microscope size={14} />Analyse selected</Button>
+            <Button sm disabled={!ids.length || ids.length > MAX_SELECTED} onClick={() => setModal('scope')}><Bookmark size={14} />Save selection as scope</Button>
             <Button sm onClick={selectAll}>Select all {data.count} matching{status || dq ? ' the filter' : ''}</Button>
             {ids.length > 0 && <Button sm variant="ghost" onClick={() => setSel(new Set())}>Clear</Button>}
             <span className="muted small">Tick rows, then analyse only those.</span>
@@ -114,6 +116,7 @@ export function TransactionsTab({ id, onAnalyse }: { id: string; onAnalyse?: (id
         {data && data.count > data.rows.length && <div className="row" style={{ padding: 12 }}><Button onClick={() => setLimit(limit + 500)}>Show more ({data.rows.length} of {data.count})</Button></div>}
       </Card>
       {modal === 'paste' && <PasteDialog id={id} onClose={() => setModal(null)} onDone={reload} />}
+      {modal === 'scope' && <SaveScopeDialog caseId={id} scope={{ mode: 'selected', transactionIds: ids }} summary={`${ids.length} selected transaction${ids.length === 1 ? '' : 's'}`} onClose={() => setModal(null)} onSaved={() => undefined} />}
       {modal === 'import' && <ImportWizard id={id} onClose={() => setModal(null)} onDone={reload} />}
       {del && <ConfirmDialog title="Delete transaction" onClose={() => setDel(null)} onConfirm={async () => { await act(() => api(`/case-transactions/${del.id}`, { method: 'DELETE' }), 'Transaction deleted'); setDel(null); }}>Remove <b className="mono">{del.hash ? short(del.hash) : del.ref}</b> from this case?</ConfirmDialog>}
     </div>

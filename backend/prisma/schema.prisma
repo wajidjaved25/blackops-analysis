@@ -227,6 +227,22 @@ model Case {
   txs         CaseTransaction[]
   analyses    CaseAnalysis[]
   graphs      CaseGraph[]
+  scopes      CaseScope[]
+}
+
+/// A named analysis scope (10C): the validated Scope JSON of backend/src/case-scope.ts. Runs copy it, so editing or deleting one never changes a past run.
+model CaseScope {
+  id          Int      @id @default(autoincrement())
+  caseId      Int
+  case        Case     @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  name        String
+  description String   @default("")
+  scope       Json
+  createdById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([caseId, name])
 }
 
 /// A named, immutable-by-default snapshot of a graph saved from the graph workspace (many per case).

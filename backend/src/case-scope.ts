@@ -1,8 +1,8 @@
 // Scope of a case analysis (Phase 10B): which of the case's transactions a run looks at. Applied before totals, the wallet table, trace seeds and pattern rules.
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ConflictException } from '@nestjs/common';
 import { norm } from './chains';
 import { detectFormat } from './statements';
-import { id, oneOf } from './util';
+import { id, oneOf, str } from './util';
 
 export const MAX_SELECTED = 5000;
 export const SCOPE_STATUSES = ['verified', 'mismatch', 'not_found', 'off_chain', 'pending', 'error'] as const;
@@ -171,4 +171,33 @@ export function assertSelectedInCase(ids: number[], caseIds: Set<number>): void 
 
 export function assertNotEmpty(inScope: number, total: number): void {
   if (!inScope) throw new BadRequestException(`No transactions match this scope (0 of ${total}). Widen the filters or choose other transactions.`);
+}
+
+// ----- saved scopes (Phase 10C) -----
+export const SCOPE_NAME_MAX = 80;
+export const SCOPE_DESC_MAX = 500;
+export const parseScopeName = (raw: unknown) => str(raw, 'name', { max: SCOPE_NAME_MAX });
+export const parseScopeDescription = (raw: unknown) => str(raw, 'description', { optional: true, max: SCOPE_DESC_MAX });
+
+/** The scope of a saved scope: the same validation as a run, and "all transactions" is not worth saving. */
+export function parseSavedScope(raw: unknown): Scope {
+  const s = parseScope(raw);
+  if (!s) throw new BadRequestException('Choose at least one filter or some transactions: "all transactions" has nothing to save');
+  return s;
+}
+
+/** Names are unique per case, compared without regard to case (the database enforces the exact-match case too). */
+export function assertNameFree(name: string, others: string[]): void {
+  const n = name.trim().toLowerCase();
+  if (others.some((o) => o.trim().toLowerCase() === n)) throw new ConflictException(`A saved scope named "${name}" already exists in this case`);
+}
+
+/** A run that used a saved scope keeps a COPY of the scope and its name in its params, so later edits or deletion of the saved scope never change it. */
+export function applySavedScope<P extends object>(params: P, saved: { id: number; name: string; scope: unknown }) {
+  return { ...params, scope: parseScope(JSON.parse(JSON.stringify(saved.scope))) ?? undefined, scopeId: saved.id, scopeName: saved.name };
+}
+
+/** Summary line: `describeScope`, with the saved scope's name in front when the run used one. */
+export function describeRunScope(s: Scope | null, savedName?: string | null): string {
+  return savedName ? `Scope: ${savedName} (saved): ${describeScope(s).replace(/^Scope: /, '')}` : describeScope(s);
 }

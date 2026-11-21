@@ -61,6 +61,8 @@ export interface Params {
   tzMin: number; // minutes east of UTC used for "local" hours
   busyTransfers: number; // a wallet whose first fetched page already holds this many transfers is service-scale: reported as an endpoint, not traced further
   scope?: Scope; // 10B: which transactions the run looked at (absent = all)
+  scopeId?: number; // 10C: set when the run used a saved scope; scope above is a copy taken at run time
+  scopeName?: string;
   direction: Direction; // forward: where the money went; backward: where it came from (source of funds); both: two traces
 }
 export type Direction = 'forward' | 'backward' | 'both';

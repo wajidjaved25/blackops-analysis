@@ -5,6 +5,7 @@ import { ApiKeysController, AuditController, OrgController, RolesController, Use
 import { AttributionController, ClusterWorker } from './attribution';
 import { AuthController, AuthGuard, RoleSeeder } from './auth';
 import { CaseAnalysisController } from './case-analysis';
+import { CaseScopesController } from './case-scopes';
 import { CaseTxController } from './case-tx';
 import { CasesController, CasesService } from './cases';
 import { Db } from './db';
@@ -21,7 +22,7 @@ import { IndexController, TransferIndex } from './transfer-index';
 import { ScreenController, ScreenWorker } from './screen';
 
 @Module({
-  controllers: [AiController, AuthController, UsersController, RolesController, OrgController, ApiKeysController, AuditController, InvestigateController, LabelsController, RiskController, ScreenController, MonitorController, CasesController, CaseTxController, CaseAnalysisController, AttributionController, IndexController, CrossChainController, WalletGroupsController],
+  controllers: [AiController, AuthController, UsersController, RolesController, OrgController, ApiKeysController, AuditController, InvestigateController, LabelsController, RiskController, ScreenController, MonitorController, CasesController, CaseTxController, CaseAnalysisController, CaseScopesController, AttributionController, IndexController, CrossChainController, WalletGroupsController],
   providers: [Db, AiService, InvestigateController, Jobs, LabelsService, BinancePor, RiskService, ScreenWorker, MonitorService, Notifier, RoleSeeder, CasesService, ClusterWorker, TransferIndex, ExchangeLists, WalletGroupsService, { provide: APP_GUARD, useClass: AuthGuard }],
 })
 export class AppModule {}
