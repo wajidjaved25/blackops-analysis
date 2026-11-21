@@ -14,8 +14,8 @@ import { num } from '@/lib/format';
 import { useApi, useDebounced } from '@/lib/hooks';
 
 interface Label { id: number; orgId: number; chain: string; address: string; name: string; category: string; source: string; sourceUrl?: string | null; confidence?: number; createdAt: string }
-interface ExList { exchange: string; snapshot: string | null; url: string | null; checkedAt: number | null; syncedAt: number | null; status: 'ok' | 'error' | 'never'; error?: string; counts?: Record<string, number>; removed?: number }
-interface St { exchangeLists?: ExList[]; counts: Record<string, number>; ofacLastSync?: string; tetherLastSync?: string; circleLastSync?: string; etherscanKey?: boolean; categories: string[] }
+interface ExSource { id: string; exchange: string; url: string; kind: 'official' | 'community'; listName: string; lastChecked: string | null; lastChanged: string | null; version: string | null; rowCounts: Record<string, number> | null; status: 'never' | 'ok' | 'error' | 'running'; error: string | null; seconds: number | null; peakRssMb: number | null }
+interface St { exchangeSources?: ExSource[]; counts: Record<string, number>; ofacLastSync?: string; tetherLastSync?: string; circleLastSync?: string; etherscanKey?: boolean; categories: string[] }
 const EXCHANGES = ['Binance', 'OKX', 'Bybit', 'KuCoin', 'Bitget', 'HTX', 'Gate', 'Kraken', 'Coinbase'];
 // 8C source badges: official (vendor page) / explorer (Tronscan, Etherscan tags) / cluster (deposit attribution) / heuristic (not stored as a label).
 const sourceKind = (s: string) => (s === 'official' ? 'official' : s === 'tronscan' || s === 'etherscan' ? 'explorer' : s === 'cluster' ? 'cluster' : s === 'statement' ? 'statement' : s);
@@ -64,14 +64,15 @@ export default function Labels() {
           <SyncCard s="circle" title="Circle blacklisted wallets (USDC)" last={st.data?.circleLastSync} />
           <Stat label="Manual · import · cluster" value={st.data ? `${num(st.data.counts.manual ?? 0)} · ${num(st.data.counts.import ?? 0)} · ${num(st.data.counts.cluster ?? 0)}` : '…'} sub={st.data && !st.data.etherscanKey ? 'Etherscan key not set: ERC20 data limited' : undefined} />
         </div>
-        <Card title="Exchange wallet lists (exchange-owned hot/cold wallets)" actions={<Button sm busy={sync === 'lists'} disabled={!canSync || !!sync} title={canSync ? '' : 'Requires labels.sync'} onClick={async () => { setSync('lists'); try { await api('/labels/exchange-lists/sync', { body: {} }); toast.success('Update check finished'); st.reload(); list.reload(); } catch (e) { toast.error((e as Error).message); } finally { setSync(''); } }}><RefreshCw size={14} />Check now</Button>}>
-          <p className="muted small" style={{ marginTop: 0 }}>Wallets the exchanges themselves publish. They are checked once a day and downloaded only when a newer snapshot exists. Customer deposit addresses are never stored from these lists (Binance's ~10 million deposit rows are checked on demand instead).</p>
-          <Table caption="Exchange wallet lists" rows={st.data?.exchangeLists ?? []} rowKey={(l) => l.exchange} pageSize={10} cols={[
-            { key: 'e', header: 'Exchange', cell: (l) => <b>{l.exchange}</b> },
-            { key: 's', header: 'Snapshot', cell: (l) => (l.snapshot ? <span className="small mono" title={l.snapshot}>{l.snapshot.length > 24 ? l.snapshot.replace(/^(W\/)?"/, '').slice(0, 12) + '…' : l.snapshot}</span> : '—') },
-            { key: 'c', header: 'Wallets', cell: (l) => (l.counts ? Object.entries(l.counts).map(([c, n]) => `${c} ${n}`).join(' · ') : '—') },
-            { key: 'k', header: 'Last check', cell: (l) => (l.checkedAt ? <Time t={new Date(l.checkedAt).toISOString()} /> : 'never') },
-            { key: 't', header: 'Status', wrap: true, cell: (l) => <span className="row" style={{ gap: 6 }}><Badge tone={l.status === 'ok' ? 'good' : l.status === 'error' ? 'severe' : 'outline'}>{l.status}</Badge>{l.error && <span className="xs muted">{l.error}</span>}{l.url && <a href={l.url} target="_blank" rel="noreferrer noopener">list file</a>}</span> },
+        <Card title="Exchange address sources" actions={<Button sm busy={sync === 'lists'} disabled={!canSync || !!sync} title={canSync ? '' : 'Requires labels.sync'} onClick={async () => { setSync('lists'); try { await api('/labels/exchange-lists/sync', { body: {} }); toast.success('Update check finished'); st.reload(); list.reload(); } catch (e) { toast.error((e as Error).message); } finally { setSync(''); } }}><RefreshCw size={14} />Check now</Button>}>
+          <p className="muted small" style={{ marginTop: 0 }}>Addresses that exchanges publish (proof-of-reserves files) and one community dataset. They are checked once a day and downloaded only when a newer version exists. Hot/cold wallets are shown as the exchange; deposit and customer-account addresses end a trace as a customer account. The community list is scraped explorer labels, not an exchange's own list.</p>
+          <Table caption="Exchange address sources" rows={st.data?.exchangeSources ?? []} rowKey={(l) => l.id} pageSize={12} cols={[
+            { key: 'e', header: 'Exchange', cell: (l) => <span className="row" style={{ gap: 6 }}><b>{l.exchange}</b><Badge tone={l.kind === 'official' ? 'good' : 'outline'}>{l.kind === 'official' ? 'official list' : 'community list'}</Badge></span> },
+            { key: 'u', header: 'Source', wrap: true, cell: (l) => (l.url ? <a href={l.url} target="_blank" rel="noreferrer noopener" className="small">{l.listName}</a> : <span className="muted small">{l.listName}</span>) },
+            { key: 'c', header: 'Addresses per chain', cell: (l) => (l.rowCounts ? ['tron', 'eth', 'bsc'].filter((c) => l.rowCounts![c]).map((c) => `${c} ${num(l.rowCounts![c])}`).join(' \u00b7 ') || '\u2014' : '\u2014') },
+            { key: 'k', header: 'Last checked', cell: (l) => (l.lastChecked ? <Time t={l.lastChecked} /> : 'never') },
+            { key: 'h', header: 'Last changed', cell: (l) => (l.lastChanged ? <Time t={l.lastChanged} /> : '\u2014') },
+            { key: 't', header: 'Status', wrap: true, cell: (l) => <span className="row" style={{ gap: 6 }}><Badge tone={l.status === 'ok' ? 'good' : l.status === 'error' ? 'severe' : 'outline'}>{l.status}</Badge>{l.error && <span className="xs muted">{l.error}</span>}</span> },
           ]} />
         </Card>
         <Card flush title={<span className="row">

@@ -425,3 +425,36 @@ model CaseAnalysis {
 
   @@index([caseId, id])
 }
+
+/// Phase 10A: one published list of exchange addresses (official proof-of-reserves file, or a community dataset).
+model ExchangeSource {
+  id          String    @id // e.g. binance, okx, community-ethlabels
+  exchange    String // display name, or "Various" for community datasets
+  url         String // exact URL of the file loaded (updated after each load)
+  kind        String // official | community
+  listName    String // text used in label names, e.g. "proof-of-reserves list" / "community list"
+  lastChecked DateTime?
+  lastChanged DateTime?
+  version     String? // snapshot date / ETag / report URL used for the cheap "changed?" check
+  rowCounts   Json? // { tron, eth, bsc, hot, deposit, controlled }
+  status      String    @default("never") // never | ok | error | running
+  error       String?
+  seconds     Float?
+  peakRssMb   Int?
+  addresses   ExchangeAddress[]
+}
+
+/// Phase 10A: exchange-attributed addresses, loaded in bulk. Replaced per source (see exchange-lists.ts loadSource).
+model ExchangeAddress {
+  chain     String // tron | eth | bsc
+  address   String // eth lowercase, tron base58
+  exchange  String
+  kind      String // hot | deposit | controlled
+  sourceId  String
+  firstSeen DateTime @default(now())
+  lastSeen  DateTime @default(now())
+  source    ExchangeSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@id([chain, address, exchange]) // also serves lookups by (chain, address)
+  @@index([sourceId])
+}

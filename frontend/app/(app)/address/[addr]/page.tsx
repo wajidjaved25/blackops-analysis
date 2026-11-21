@@ -18,8 +18,8 @@ import { useApi } from '@/lib/hooks';
 
 interface Label { name: string; category: string; source?: string; confidence?: number }
 interface FullLabel extends Label { id: number; sourceUrl?: string | null }
-const SRC_RANK: Record<string, number> = { official: 0, tronscan: 1, etherscan: 1, statement: 1, cluster: 2 };
-const SRC_KIND = (s?: string) => (s === 'official' ? 'official' : s === 'tronscan' || s === 'etherscan' ? 'explorer' : s ?? 'label');
+const SRC_RANK: Record<string, number> = { official: 0, tronscan: 1, etherscan: 1, statement: 1, community: 1, cluster: 2 };
+const SRC_KIND = (s?: string) => (s === 'official' ? 'official' : s === 'community' ? 'community list' : s === 'tronscan' || s === 'etherscan' ? 'explorer' : s ?? 'label');
 interface Assessment { score: number; level: string; own: number; direct: number; indirect: number; reasons: string[]; exposures: { address: string; name: string; category: string; weight: number; volume: number; share: number }[]; labels: Label[]; frozen: boolean; frozenBy: string[]; transfersChecked: number }
 interface Cp { address: string; in: number; out: number; inCount: number; outCount: number; label: { name: string; category: string } | null }
 interface Tr { hash: string; from: string; to: string; amount: number; asset: Asset; timestamp: number }

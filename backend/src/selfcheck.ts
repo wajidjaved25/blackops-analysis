@@ -6,12 +6,15 @@ import { detectSwaps, selfCheckSwap } from './swap';
 import { detectChain, flows, parseTronTx, FrozenMap, frozenBy, hexToTron, isTxHash, norm, parseFreezeLog, Transfer, tronToHex20 } from './chains';
 import { buildGraph, findPath } from './graph';
 import { CATEGORIES, level, scoreRisk, WEIGHTS } from './risk-score';
-import { applyHotList } from './exchange-lists';
+import { cleanRow, loadSource } from './exchange-lists';
+import { addrRow, COMMUNITY_SLUGS, okxParser, parseCommunityLine, parseHackenText, parseMexcLine, rowLabel } from './exchange-parsers';
+import { LabelsService } from './labels';
+import { Db } from './db';
 import { groupFindings, groupWallets } from './wallet-groups';
 import { autoAcceptDeposit, clusterConfidence, depositEvidence, exchangeName } from './cluster';
 import { isServiceScale, mapExplorerTag, parsePorList, pickTronscanTag, porName, SERVICE_SCALE_ROWS } from './exchange-labels';
 import { withVolumes } from './graph';
-import { auditId, parsePorLine, parseSnapshot, porKey, porLabelName, snapshotIso } from './binance-por';
+import { auditId, parsePorLine, parseSnapshot, porKey, snapshotIso } from './binance-por';
 import { planRead, retryDelayMs, splitBoundary, tailEnd, withSeq } from './index-rules';
 import { evaluateRiskChange, evaluateRules, riskSnap, ruleParams } from './monitor-rules';
 import { ALL_PERMS, hasAny, missing, PERMISSIONS, SYSTEM_ROLES } from './permissions';
@@ -691,8 +694,6 @@ ${PE1}`, 2).length, 2); // cap
     assert.equal(auditId(parseSnapshot('01/09/26 00:00:00 UTC | BTC Block Height 964957')!), 'PR01SEP26');
     assert.equal(auditId(parseSnapshot('31/12/25 00:00:00 UTC')!), 'PR31DEC25');
     assert.equal(parseSnapshot('garbage'), null);
-    assert.equal(porLabelName('hotcold', s), 'Binance hot/cold wallet (proof-of-reserves 12 Nov 2026)');
-    assert.equal(porLabelName('deposit', s), 'Binance deposit address (proof-of-reserves 12 Nov 2026)');
     const TR = 'TQn9Y2khEsLJW1ChVWFMSMeRDow5KcbLSE';
     assert.deepEqual(parsePorLine(`USDT,TRX,${TR},1.5,100,`), { chain: 'tron', address: TR }); // Tron keeps its case
     assert.deepEqual(parsePorLine('USDT,ETH,0xAbCdEf0123456789aBcDeF0123456789AbCdEf01,2,100,Ceffu'), { chain: 'eth', address: '0xabcdef0123456789abcdef0123456789abcdef01' });
@@ -829,28 +830,6 @@ ${PE1}`, 2).length, 2); // cap
     assert.ok(f9.find((f) => f.type === 'exchange_endpoint')!.title.includes('(exchange wallet)'));
     const cf = f9.find((f) => f.type === 'exchange_customer_endpoint')!;
     assert.ok(cf.title.includes('customer account (deposit address)') && cf.statement.includes('not a Binance wallet') && cf.statement.includes('account holder records'));
-    // stored hot/cold lists: rows replace the previous list, only this list's own labels are removed, a foreign official label is never overwritten
-    const store: { id: number; chain: string; address: string; name: string; category: string; source: string; orgId: number }[] = [
-      { id: 1, chain: 'tron', address: 'OLD', name: 'Binance hot/cold wallet (proof-of-reserves 01 Oct 2026)', category: 'exchange', source: 'official', orgId: 0 },
-      { id: 2, chain: 'tron', address: 'KEEP', name: 'Binance hot/cold wallet (proof-of-reserves 01 Oct 2026)', category: 'exchange', source: 'official', orgId: 0 },
-      { id: 3, chain: 'tron', address: 'DEP', name: 'Binance deposit address (proof-of-reserves 01 Oct 2026)', category: 'exchange_deposit', source: 'official', orgId: 0 },
-      { id: 4, chain: 'tron', address: 'VENDOR', name: 'Vendor named wallet', category: 'exchange', source: 'official', orgId: 0 },
-    ];
-    const fake = {
-      label: {
-        findMany: async ({ where }: any) => store.filter((l) => (where.NOT ? !l.name.startsWith(where.NOT.name.startsWith) && where.address.in.includes(l.address) : l.category === where.category && l.name.startsWith(where.name.startsWith))),
-        deleteMany: async ({ where }: any) => { let n = 0; for (const id of where.id.in) { const i = store.findIndex((l) => l.id === id); if (i >= 0) { store.splice(i, 1); n++; } } return { count: n }; },
-        upsert: async ({ where, create, update }: any) => { const k = where.chain_address_source_orgId; const l = store.find((x) => x.chain === k.chain && x.address === k.address); if (l) Object.assign(l, update); else store.push({ id: store.length + 10, ...create }); },
-      },
-      $transaction: async (ps: Promise<unknown>[]) => Promise.all(ps),
-    };
-    const out9 = await applyHotList(fake as never, [{ chain: 'tron', address: 'KEEP' }, { chain: 'tron', address: 'NEW' }, { chain: 'tron', address: 'VENDOR' }], { prefix: 'Binance hot/cold wallet (proof-of-reserves', name: 'Binance hot/cold wallet (proof-of-reserves 12 Nov 2026)', url: 'https://example.org/x.zip' });
-    assert.deepEqual([out9.written, out9.removed, out9.skippedForeign], [2, 1, 1]);
-    assert.ok(!store.some((l) => l.address === 'OLD') && store.some((l) => l.address === 'DEP')); // dropped wallet removed, deposit label untouched
-    assert.equal(store.find((l) => l.address === 'KEEP')!.name, 'Binance hot/cold wallet (proof-of-reserves 12 Nov 2026)');
-    assert.equal(store.find((l) => l.address === 'VENDOR')!.name, 'Vendor named wallet');
-    assert.ok(store.some((l) => l.address === 'NEW' && l.category === 'exchange'));
-
     // wallet grouping on crafted data
     const hh = (h: number) => T + h * 3600_000;
     const g = (hash: string, from: string, to: string, h: number): Transfer => ({ asset: 'usdt', hash, from, to, amount: 10, timestamp: hh(h) });
@@ -969,6 +948,96 @@ ${PE1}`, 2).length, 2); // cap
     // summary line names the saved scope; unsaved scopes read as before
     assert.equal(describeRunScope(parseScope({ statuses: ['verified'] }), 'Night withdrawals'), 'Scope: Night withdrawals (saved): verified only');
     assert.equal(describeRunScope(parseScope({ statuses: ['verified'] })), 'Scope: verified only');
+  }
+  // ---- Phase 10A: exchange address lists (synthetic addresses only: generated, not real) ----
+  {
+    const tr = (n: number) => hexToTron(n.toString(16).padStart(2, '0').repeat(20));
+    const ev = (n: number) => '0x' + n.toString(16).padStart(2, '0').repeat(20);
+    const evMixed = '0x' + 'aB'.repeat(20);
+    // Hacken PDF text (Bybit / KuCoin): "<Network>\t<address>", other chains and wrapped Aptos rows are skipped
+    const hk = parseHackenText(['Verified wallets', 'Network \tAddress', `Ethereum \t${evMixed}`, `Tron \t${tr(0x11)}`, `BSC \t${ev(0x22)}`, `Arbitrum \t${ev(0x33)}`, `Aptos 0x${'1'.repeat(50)}`, '9f712e35d9a1e8', `Tron \t${tr(0x11).slice(0, 30)}XXXX`, `Ethereum ${ev(0x44)}`].join('\n'));
+    assert.deepEqual(hk.map((r) => [r.chain, r.address, r.kind]), [['eth', evMixed.toLowerCase(), 'hot'], ['tron', tr(0x11), 'hot'], ['bsc', ev(0x22), 'hot'], ['eth', ev(0x44), 'hot']]);
+    // OKX: coin table first, then the address table; only TRON / ETH / BSC networks, kind controlled
+    const okx = okxParser();
+    const okxRows = ['coin,amount', 'USDT,5', '', 'coin,Type,Network,Snapshot Height,address,amount,message,signature1', `USDT,Non Staking,TRON,1,${tr(0x55)},9,I am an OKX address,sig`, `USDT,Non Staking,ETH,1,${ev(0x66)},9,m,sig`, `BTC,Non Staking,BTC,1,bc1qqqqqq,9,m,sig`, `USDT,Non Staking,ARBITRUM,1,${ev(0x77)},9,m,sig`, `USDT,Non Staking,TRON,1,${tr(0x55).slice(0, 33)}1,9,m,sig`].map(okx).filter(Boolean);
+    assert.deepEqual(okxRows.map((r) => [r!.chain, r!.kind]), [['tron', 'controlled'], ['eth', 'controlled']]);
+    // MEXC: BOM + Chinese header, address by pattern, any 0x -> eth, other chains ignored
+    assert.equal(parseMexcLine('﻿资产,链,钱包地址,余额'), null);
+    assert.deepEqual(parseMexcLine(`USDT,Tron(TRC20),${tr(0x88)},1.5`), { chain: 'tron', address: tr(0x88), kind: 'hot' });
+    assert.equal(parseMexcLine(`USDT,Arbitrum One(ARB),${evMixed},1`)!.address, evMixed.toLowerCase());
+    assert.equal(parseMexcLine('USDT,Solana(SOL),5PAhQiYdAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,1'), null);
+    // community CSV: whitelisted slugs on chain 1, label "exchange" on chain 56, spam slugs and other chains dropped
+    const dl = (a: string, c: number, l: string, t: string) => `"${a}",${c},"${l}","${t}"`;
+    assert.deepEqual(parseCommunityLine(dl(evMixed, 1, 'kraken', 'Kraken 7')), { chain: 'eth', address: evMixed.toLowerCase(), kind: 'hot', exchange: 'Kraken' });
+    assert.equal(parseCommunityLine(dl(ev(1), 1, 'bitget', 'Bitget Dep: x')), null);
+    assert.equal(parseCommunityLine(dl(ev(1), 8453, 'kraken', 'Kraken')), null);
+    assert.equal(parseCommunityLine(dl(ev(2), 56, 'exchange', 'Binance Hot Wallet 10'))!.exchange, 'Binance');
+    assert.equal(parseCommunityLine(dl(ev(2), 56, 'exchange', 'MaskEX: Wallet'))!.exchange, 'MaskEX');
+    assert.equal(parseCommunityLine('address,chainId,label,nameTag'), null);
+    assert.ok(!('bitget' in COMMUNITY_SLUGS) && !('deribit' in COMMUNITY_SLUGS));
+    // validation of untrusted rows
+    assert.equal(addrRow(`${tr(0x11).slice(0, 33)}1`, 'hot'), null); // bad Tron checksum
+    assert.equal(cleanRow({ chain: 'tron', address: ev(1), kind: 'hot' }, 'X'), null); // 0x on tron
+    assert.equal(cleanRow({ chain: 'eth', address: tr(1), kind: 'hot' }, 'X'), null);
+    assert.equal(cleanRow({ chain: 'eth', address: ev(1), kind: 'weird' as never }, 'X'), null);
+    assert.equal(cleanRow({ chain: 'eth', address: ev(1), kind: 'hot', exchange: '   ' }, '  '), null);
+    assert.equal(cleanRow({ chain: 'eth', address: evMixed, kind: 'hot' }, 'X')!.address, evMixed.toLowerCase());
+    // label mapping: hot -> exchange, deposit / controlled -> exchange_deposit
+    assert.deepEqual(rowLabel('OKX', 'hot', 'proof-of-reserves list'), { name: 'OKX hot/cold wallet (proof-of-reserves list)', category: 'exchange' });
+    assert.deepEqual(rowLabel('OKX', 'controlled', 'proof-of-reserves list'), { name: 'OKX customer deposit address (proof-of-reserves list)', category: 'exchange_deposit' });
+    assert.equal(exchangeName(rowLabel('Binance', 'deposit', 'x').name), 'Binance');
+    assert.equal(exchangeName(rowLabel('Bybit', 'hot', 'x').name), 'Bybit');
+    // LabelsService.exchangeLabels with a fake table
+    const table = [
+      { address: ev(1), exchange: 'Binance', kind: 'hot', source: { kind: 'official', listName: 'proof-of-reserves list', url: 'https://x/a.zip' } },
+      { address: ev(2), exchange: 'Binance', kind: 'deposit', source: { kind: 'official', listName: 'proof-of-reserves list', url: 'https://x/a.zip' } },
+      { address: ev(3), exchange: 'Kraken', kind: 'hot', source: { kind: 'community', listName: 'community list', url: 'https://x/c.csv' } },
+    ];
+    let seenChains: string[] = [];
+    const svc = new LabelsService({ exchangeAddress: { findMany: async ({ where }: any) => { seenChains = where.chain.in; return table.filter((r) => where.address.in.includes(r.address)); } } } as never, {} as never);
+    const lk = await svc.exchangeLabels('bsc', [ev(1), ev(2), ev(3), ev(4)]);
+    assert.deepEqual(seenChains, ['bsc', 'eth']); // BNB Chain also reads the Ethereum-keyed rows
+    assert.deepEqual([lk.get(ev(1))![0].category, lk.get(ev(2))![0].category, lk.get(ev(3))![0].category], ['exchange', 'exchange_deposit', 'exchange']);
+    assert.deepEqual([lk.get(ev(1))![0].source, lk.get(ev(3))![0].source, lk.get(ev(3))![0].confidence, lk.get(ev(1))![0].sourceUrl], ['official', 'community', 0.7, 'https://x/a.zip']);
+    assert.ok(!lk.has(ev(4)));
+    // replace-by-source semantics against a real database (skipped when none is reachable): a second load drops rows missing from it, keeps firstSeen, a bad load rolls back, community never overwrites official
+    try {
+      process.loadEnvFile?.('.env');
+    } catch {}
+    const db = new Db();
+    try {
+      await db.$connect();
+      const ids = ['selftest-a', 'community-selftest'];
+      const clean = () => db.exchangeSource.deleteMany({ where: { id: { in: ids } } });
+      await clean();
+      for (const [id, kind] of [['selftest-a', 'official'], ['community-selftest', 'community']]) await db.exchangeSource.create({ data: { id, exchange: 'SelfTest', url: 'https://x', kind, listName: 'l' } });
+      const rows = (...n: number[]) => (async function* () { for (const i of n) yield { chain: 'eth' as const, address: ev(i), kind: 'hot' as const }; })();
+      const def = { id: 'selftest-a', exchange: 'SelfTest', maxRows: 100 };
+      await loadSource(db, def, rows(1, 2, 3));
+      const key = (i: number) => ({ chain_address_exchange: { chain: 'eth', address: ev(i), exchange: 'SelfTest' } });
+      const first = (await db.exchangeAddress.findUnique({ where: key(2) }))!;
+      await new Promise((r) => setTimeout(r, 30));
+      const r2 = await loadSource(db, def, rows(2, 3, 4));
+      assert.equal(r2.removed, 1);
+      assert.deepEqual((await db.exchangeAddress.findMany({ where: { sourceId: 'selftest-a' }, orderBy: { address: 'asc' } })).map((x) => x.address), [ev(2), ev(3), ev(4)]);
+      const second = (await db.exchangeAddress.findUnique({ where: key(2) }))!;
+      assert.equal(second.firstSeen.getTime(), first.firstSeen.getTime());
+      assert.ok(second.lastSeen.getTime() > first.lastSeen.getTime());
+      await assert.rejects(loadSource(db, def, rows()), /no valid addresses/); // empty list: rolled back
+      await assert.rejects(loadSource(db, { ...def, maxRows: 2 }, rows(7, 8, 9)), /refusing/); // too large: rolled back
+      assert.equal(await db.exchangeAddress.count({ where: { sourceId: 'selftest-a' } }), 3);
+      await loadSource(db, { id: 'community-selftest', exchange: 'SelfTest', maxRows: 100 }, rows(2, 5)); // 2 is owned by the official list
+      assert.equal((await db.exchangeAddress.findUnique({ where: key(2) }))!.sourceId, 'selftest-a');
+      assert.equal(await db.exchangeAddress.count({ where: { sourceId: 'community-selftest' } }), 1);
+      await clean(); // cascades to the rows
+      assert.equal(await db.exchangeAddress.count({ where: { exchange: 'SelfTest' } }), 0);
+      console.log('selfcheck: exchange list DB asserts ran');
+    } catch (e) {
+      if ((e as { code?: string }).code === 'P1001' || /reach database|Environment variable not found|DATABASE_URL/.test((e as Error).message)) console.log('selfcheck: exchange list DB asserts SKIPPED (no database)');
+      else throw e;
+    } finally {
+      await db.$disconnect().catch(() => undefined);
+    }
   }
 
   console.log('selfcheck: all passed');

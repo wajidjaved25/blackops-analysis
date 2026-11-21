@@ -20,7 +20,7 @@ export const porName = (exchange: string) => `${exchange} (proof-of-reserves wal
 
 const TOKEN = /\b(?:T[1-9A-HJ-NP-Za-km-z]{33}|0x[0-9a-fA-F]{40})\b/g;
 /** Tron addresses must also pass the base58check checksum (hexToTron re-encodes it). */
-const validTron = (a: string) => {
+export const validTron = (a: string) => {
   try {
     return hexToTron(tronToHex20(a)) === a;
   } catch {
