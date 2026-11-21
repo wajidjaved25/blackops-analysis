@@ -7,7 +7,8 @@ import { Chain, getTransfers } from './chains';
 import { audit, Ctx, Db } from './db';
 import { Jobs } from './jobs';
 import { LabelsService } from './labels';
-import { evaluateRules, RULE_TYPES, ruleParams } from './monitor-rules';
+import { Hit, evaluateRiskChange, evaluateRules, riskSnap, RiskSnap, RULE_TYPES, ruleParams } from './monitor-rules';
+import { RiskService } from './risk';
 import { assertPublicUrl, extractAddresses, found, id, int, oneOf, str } from './util';
 
 const ALERT_STATUSES = ['open', 'reviewing', 'closed'] as const;
@@ -78,6 +79,7 @@ export class MonitorService implements OnModuleInit {
     private jobs: Jobs,
     private labels: LabelsService,
     private notifier: Notifier,
+    private risk: RiskService,
   ) {}
 
   onModuleInit() {
@@ -92,12 +94,30 @@ export class MonitorService implements OnModuleInit {
       include: { watchlist: { include: { rules: { where: { enabled: true } } } } },
       orderBy: { lastCheckedAt: { sort: 'asc', nulls: 'first' } },
     });
+    // Risk re-scores are expensive (up to 500 transfers + label lookups per wallet): only wallets whose last score is older than
+    // RISK_RECHECK_SEC (default 1 h) are due, and at most RISK_MAX_PER_POLL (default 5, longest-waiting first) run per pass.
+    const every = Number(process.env.RISK_RECHECK_SEC ?? 3600) * 1000;
+    const maxRisk = Number(process.env.RISK_MAX_PER_POLL ?? 5);
+    const due = new Set(
+      items
+        .filter((i) => i.watchlist.rules.some((r) => r.type === 'risk_change') && (!i.lastRiskAt || Date.now() - i.lastRiskAt.getTime() >= every))
+        .sort((a, b) => (a.lastRiskAt?.getTime() ?? 0) - (b.lastRiskAt?.getTime() ?? 0))
+        .slice(0, maxRisk)
+        .map((i) => i.id),
+    );
     let alerts = 0;
     for (const it of items) {
       try {
         alerts += await this.check(it);
       } catch (e) {
         this.log.warn(`check ${it.address} failed: ${(e as Error).message}`);
+      }
+      if (due.has(it.id)) {
+        try {
+          alerts += await this.riskCheck(it);
+        } catch (e) {
+          this.log.warn(`risk re-score ${it.address} failed: ${(e as Error).message}`);
+        }
       }
     }
     return { checked: items.length, alerts };
@@ -120,19 +140,36 @@ export class MonitorService implements OnModuleInit {
     const hits = evaluateRules(it.watchlist.rules, it.address, fresh, history, (a) => lm.get(a) ?? [], now.getTime());
 
     let created = 0;
-    for (const h of hits) {
-      try {
-        const a = await this.db.alert.create({
-          data: { orgId: it.watchlist.orgId, watchItemId: it.id, ruleId: h.ruleId, dedupKey: h.dedupKey, chain, address: it.address, counterparty: h.counterparty, amount: h.amount, asset: h.asset, txHash: h.txHash, detail: h.detail },
-        });
-        created++;
-        await this.notifier.alertCreated(a);
-      } catch (e) {
-        if ((e as Prisma.PrismaClientKnownRequestError).code !== 'P2002') throw e; // P2002 = duplicate alert, already raised
-      }
-    }
+    for (const h of hits) created += await this.raise(it, h);
     await this.db.watchItem.update({ where: { id: it.id }, data: { lastSeenTs: BigInt(Math.max(newest, since)), lastCheckedAt: now } });
     return created;
+  }
+
+  /** Stores an alert (a duplicate is ignored) and sends it through email / webhook. Returns 1 when a new alert was raised. */
+  private async raise(it: { id: number; chain: string; address: string; watchlist: { orgId: number } }, h: Hit): Promise<number> {
+    try {
+      const a = await this.db.alert.create({
+        data: { orgId: it.watchlist.orgId, watchItemId: it.id, ruleId: h.ruleId, dedupKey: h.dedupKey, chain: it.chain, address: it.address, counterparty: h.counterparty, amount: h.amount, asset: h.asset, txHash: h.txHash, detail: h.detail },
+      });
+      await this.notifier.alertCreated(a);
+      return 1;
+    } catch (e) {
+      if ((e as Prisma.PrismaClientKnownRequestError).code !== 'P2002') throw e; // P2002 = duplicate alert, already raised
+      return 0;
+    }
+  }
+
+  /** Re-scores one watched wallet, alerts on a worse state (risk_change rule), and stores the new state. The first score is only a baseline. */
+  private async riskCheck(it: Prisma.WatchItemGetPayload<{ include: { watchlist: { include: { rules: true } } } }>): Promise<number> {
+    const rule = it.watchlist.rules.find((r) => r.type === 'risk_change');
+    if (!rule) return 0;
+    const a = await this.risk.assess(it.chain as Chain, it.address, it.watchlist.orgId, { deep: false });
+    const next = riskSnap(a);
+    const prev = it.lastRiskState && it.lastRiskLevel ? (it.lastRiskState as unknown as RiskSnap) : null;
+    const hit = evaluateRiskChange(rule, prev, next, a.reasons, Date.now());
+    const raised = hit ? await this.raise(it, hit) : 0;
+    await this.db.watchItem.update({ where: { id: it.id }, data: { lastRiskScore: next.score, lastRiskLevel: next.level, lastRiskAt: new Date(), lastRiskState: next as unknown as Prisma.InputJsonValue } });
+    return raised;
   }
 }
 

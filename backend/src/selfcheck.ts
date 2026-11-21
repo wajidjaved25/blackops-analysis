@@ -11,9 +11,9 @@ import { isServiceScale, mapExplorerTag, parsePorList, pickTronscanTag, porName,
 import { withVolumes } from './graph';
 import { auditId, parsePorLine, parseSnapshot, porKey, porLabelName, snapshotIso } from './binance-por';
 import { planRead, retryDelayMs, splitBoundary, tailEnd, withSeq } from './index-rules';
-import { evaluateRules, ruleParams } from './monitor-rules';
+import { evaluateRiskChange, evaluateRules, riskSnap, ruleParams } from './monitor-rules';
 import { ALL_PERMS, hasAny, missing, PERMISSIONS, SYSTEM_ROLES } from './permissions';
-import { graphAddresses, pickSources, timelineHops } from './timeline';
+import { boundedMap, graphAddresses, graphStats, pickSources, timelineHops } from './timeline';
 import { base32, newRecoveryCodes, openSecret, recoveryHash, sealSecret, totp, unbase32, verifyTotp } from './totp';
 import { detectFormat, exchangeOfFormat, headerTz, matchTx, networkChain, normalizeRows, offChainDepositAddresses, parseTime, tzMinutes } from './statements';
 import { readGrid } from './case-tx';
@@ -206,6 +206,55 @@ async function main() {
   assert.deepEqual(pickSources([{ address: 'a', role: 'other' }, { address: 'b', role: 'suspect' }, { address: 'c', role: 'victim' }]), ['c']);
   assert.deepEqual(pickSources([{ address: 'a', role: 'other' }, { address: 'b', role: 'suspect' }]), ['b']);
   assert.deepEqual(graphAddresses({ nodes: [{ data: { id: 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t' } }, { data: { id: 'not-an-address' } }], edges: [] }), ['TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t']);
+
+  // --- 9B graph snapshots: stats mirror the SQL in the case_graphs data migration; every saved shape is readable ---
+  const GN = { chain: 'bsc', nodes: [{ data: { id: '0xabcdef0123456789abcdef0123456789abcdef01', root: true } }, { data: { id: 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t' } }], edges: [{ data: { id: 'a>b', source: 'a', target: 'b' } }] };
+  assert.deepEqual(graphStats(GN), { nodes: 2, edges: 1, chain: 'bsc', root: '0xabcdef0123456789abcdef0123456789abcdef01' });
+  assert.deepEqual(graphStats(JSON.stringify(GN)), graphStats(GN)); // older saves stored a JSON string
+  assert.deepEqual(graphStats({ elements: { nodes: GN.nodes, edges: [] } }), { nodes: 2, edges: 0, chain: 'tron', root: '0xabcdef0123456789abcdef0123456789abcdef01' });
+  assert.deepEqual(graphStats([{ data: { id: 'x' } }, { group: 'edges', data: { id: 'e', source: 'x', target: 'y' } }]), { nodes: 1, edges: 1, chain: 'tron', root: null });
+  assert.deepEqual(graphStats(null), { nodes: 0, edges: 0, chain: 'tron', root: null });
+  assert.deepEqual(graphStats('not json'), { nodes: 0, edges: 0, chain: 'tron', root: null });
+  assert.equal(graphAddresses(JSON.stringify(GN)).length, 2);
+  // timeline bounds: a slow wallet times out with a warning, the others still return; an exhausted budget skips the rest
+  const bm = await boundedMap(['fast', 'slow', 'boom', 'fast2'], 2, 40, Date.now() + 5000, async (x) => (x === 'slow' ? new Promise<string>((r) => setTimeout(() => r(x), 400)) : x === 'boom' ? Promise.reject(new Error('rate limited')) : x), (x) => x);
+  assert.deepEqual(bm.done.sort(), ['fast', 'fast2']);
+  assert.equal(bm.warnings.length, 2);
+  assert.ok(bm.warnings.some((w) => /slow: took longer/.test(w)) && bm.warnings.some((w) => /boom: rate limited/.test(w)));
+  const late = await boundedMap(['a', 'b'], 1, 40, Date.now() - 1, async (x) => x, (x) => x);
+  assert.equal(late.done.length, 0);
+  assert.match(late.warnings[0], /time budget/);
+
+  // --- 9B risk_change rule ---
+  const rcr = { id: 7, type: 'risk_change', params: ruleParams('risk_change', {}) };
+  assert.deepEqual(rcr.params, { minWeight: 50, asset: 'all' });
+  assert.throws(() => ruleParams('risk_change', { minWeight: 0 }));
+  const snap = (over: Partial<ReturnType<typeof riskSnap>> = {}) => ({ score: 5, level: 'low', frozen: false, sanctioned: false, highRiskLabel: false, flagged: {}, ...over });
+  assert.equal(evaluateRiskChange(rcr, null, snap({ level: 'severe', score: 90 }), [], nowMs), null); // first score = baseline, never an alert
+  assert.equal(evaluateRiskChange(rcr, snap(), snap({ score: 9 }), [], nowMs), null); // unchanged level
+  assert.equal(evaluateRiskChange(rcr, snap({ level: 'high', score: 50 }), snap({ level: 'low', score: 5 }), [], nowMs), null); // a drop never alerts
+  const up = evaluateRiskChange(rcr, snap(), snap({ level: 'high', score: 55 }), ['Direct exposure: x'], nowMs)!;
+  assert.match(up.detail, /rose from Low \(5\) to High \(55\)/);
+  assert.match(up.detail, /Before: Low \(5\)\. Now: High \(55\)/);
+  assert.match(up.detail, /Reasons now: Direct exposure: x/);
+  assert.equal(up.ruleId, 7);
+  assert.equal(up.asset, 'all');
+  assert.match(evaluateRiskChange(rcr, snap(), snap({ frozen: true }), [], nowMs)!.detail, /now frozen/);
+  assert.match(evaluateRiskChange(rcr, snap(), snap({ sanctioned: true }), [], nowMs)!.detail, /now labelled sanctioned/);
+  assert.match(evaluateRiskChange(rcr, snap(), snap({ highRiskLabel: true }), [], nowMs)!.detail, /now labelled high-risk/);
+  assert.equal(evaluateRiskChange(rcr, snap({ frozen: true }), snap({ frozen: true }), [], nowMs), null); // already frozen: no repeat
+  const exp = evaluateRiskChange(rcr, snap({ flagged: { TOld: 90 } }), snap({ flagged: { TOld: 90, TNew: 90 } }), [], nowMs)!; // same level, new flagged counterparty
+  assert.match(exp.detail, /new direct exposure to 1 flagged wallet \(TNew weight 90\)/);
+  assert.equal(exp.counterparty, 'TNew');
+  assert.equal(evaluateRiskChange(rcr, snap({ flagged: { TOld: 90 } }), snap({ flagged: { TOld: 90 } }), [], nowMs), null);
+  assert.equal(evaluateRiskChange(rcr, snap(), snap({ flagged: { TLow: 20 } }), [], nowMs), null); // below the rule's minWeight (50)
+  assert.equal(evaluateRiskChange({ ...rcr, params: { minWeight: 10 } }, snap(), snap({ flagged: { TLow: 20 } }), [], nowMs)!.counterparty, 'TLow');
+  assert.equal(evaluateRiskChange(rcr, snap({ flagged: { TWeak: 20 } }), snap({ flagged: { TWeak: 90 } }), [], nowMs)!.counterparty, 'TWeak'); // a known wallet that became risky counts as new at that weight
+  // riskSnap maps an assessment: sanctioned / high-risk labels, flagged exposures only
+  const rs = riskSnap({ score: 80, level: 'severe', frozen: true, labels: [{ category: 'sanctioned' }, { category: 'mixer' }], exposures: [{ address: 'A', weight: 90 }, { address: 'B', weight: 0 }] });
+  assert.deepEqual(rs, { score: 80, level: 'severe', frozen: true, sanctioned: true, highRiskLabel: true, flagged: { A: 90 } });
+  assert.equal(riskSnap({ score: 1, level: 'low', frozen: false, labels: [{ category: 'exchange' }, { category: 'gambling' }], exposures: [] }).highRiskLabel, false);
+  assert.equal(evaluateRules([rcr], ME, [big], [big], noLabels, nowMs).length, 0); // the transfer rules engine ignores risk_change
 
   // --- deposit-address clustering heuristic ---
   const HOT = 'THot';

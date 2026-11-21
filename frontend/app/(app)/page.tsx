@@ -15,7 +15,7 @@ interface CaseRow { id: number; title: string; status: string; updatedAt: string
 interface Job { id: number; name: string; status: string; progress: number; total: number; createdAt: string }
 interface LabelStatus { counts: Record<string, number> }
 
-const RULE: Record<string, string> = { amount_over: 'Large transfer', flagged_counterparty: 'Flagged counterparty', volume_spike: 'Volume spike' };
+const RULE: Record<string, string> = { amount_over: 'Large transfer', flagged_counterparty: 'Flagged counterparty', volume_spike: 'Volume spike', risk_change: 'Risk change' };
 
 export default function Dashboard() {
   const { can, me } = useAuth();
@@ -71,7 +71,7 @@ export default function Dashboard() {
               <EmptyState title="No open alerts" action={<LinkButton href="/monitoring" sm>Set up monitoring</LinkButton>}>Add wallets to a watchlist and rules to get alerted on new activity.</EmptyState>
             ) : alerts.data.rows.slice(0, 6).map((a) => (
               <Link key={a.id} href="/alerts" className="row nw" style={{ padding: '10px 16px', borderBottom: '1px solid var(--border)', color: 'inherit' }}>
-                <div className="grow"><div className="small" style={{ fontWeight: 600 }}>{RULE[a.rule?.type ?? ''] ?? 'Alert'} · {num(a.amount)} USDT</div><div className="xs muted mono">{short(a.address)} · {a.watchItem?.watchlist?.name}</div></div>
+                <div className="grow"><div className="small" style={{ fontWeight: 600 }}>{RULE[a.rule?.type ?? ''] ?? 'Alert'}{a.rule?.type === 'risk_change' ? '' : ` · ${num(a.amount)} USDT`}</div><div className="xs muted mono">{short(a.address)} · {a.watchItem?.watchlist?.name}</div></div>
                 <span className="xs muted"><Time t={a.createdAt} /></span>
               </Link>
             ))}

@@ -52,6 +52,7 @@ function Workspace() {
   const { can } = useAuth();
   const root = params.get('addr') ?? '';
   const caseId = params.get('case');
+  const snapshotId = params.get('snapshot');
   const [chainOv, setChainOv] = useState<Chain | null>(null); // a saved case graph carries its own chain
   const chain = chainOv ?? resolveChain(root, params.get('chain'));
   const asset: AssetFilter = params.get('asset') === 'usdt' || params.get('asset') === 'usdc' ? (params.get('asset') as Asset) : 'all';
@@ -88,7 +89,8 @@ function Workspace() {
   const [showPath, setShowPath] = useState(false);
   const [hopFor, setHopFor] = useState('');
   const [hopCase, setHopCase] = useState<{ chain: Chain; address: string; note: string } | null>(null);
-  const savedCase = useApi<{ title: string; graphJson: unknown }>(caseId ? `/cases/${caseId}` : null);
+  // A case graph is a named snapshot: ?case=ID&snapshot=ID opens that one, ?case=ID alone opens the newest.
+  const savedCase = useApi<{ name: string; graphJson: unknown }>(snapshotId ? `/case-graphs/${snapshotId}` : caseId ? `/cases/${caseId}/graphs/latest` : null);
 
   const colorTouched = useRef(false); // once the user picks a link colour we stop switching to asset colours automatically
   const L = useRef({ layout, edgeColor, perTx });
@@ -314,7 +316,7 @@ function Workspace() {
       (el.edges ?? []).forEach((e) => edges.current.set(e.data.id, e.data));
       const r = [...nodes.current.values()].find((n) => n.root);
       if (r) { rootRef.current = r.id; setRootInput(r.id); }
-      sync(); runLayout(); setInfo(`Saved graph from case “${savedCase.data?.title}”. Double-click a wallet to keep expanding.`);
+      sync(); runLayout(); setInfo(`Saved snapshot “${savedCase.data?.name}”. Saving it again creates a new snapshot; the original is never overwritten. Double-click a wallet to keep expanding.`);
     } catch { setError('This case graph could not be read.'); }
   }, [savedCase.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -499,7 +501,7 @@ function Workspace() {
           </aside>
         )}
       </div>
-      {saveOpen && <SaveToCase onClose={() => setSaveOpen(false)} getPayload={() => ({ elements: elementsJson(), png: png(1) })} />}
+      {saveOpen && <SaveToCase onClose={() => setSaveOpen(false)} defaultName={`${rootRef.current ? short(rootRef.current) : 'Graph'} · ${new Date().toISOString().slice(0, 10)}`} defaultCase={caseId} getPayload={() => ({ elements: elementsJson(), png: png(1), depth: Number(depth) || undefined, filters: Object.fromEntries(Object.entries({ fanout, from, to, min, asset: asset === 'all' ? '' : asset }).filter(([, v]) => v !== '')) })} />}
       {caseAddr && <AddToCaseModal address={parseKey(caseAddr, chain).addr} chain={parseKey(caseAddr, chain).chain} onClose={() => setCaseAddr('')} />}
       {hopFor && (
         <HopModal
@@ -616,32 +618,37 @@ function SaveHopModal({ target, onClose }: { target: { chain: Chain; address: st
   );
 }
 
-function SaveToCase({ onClose, getPayload }: { onClose: () => void; getPayload: () => { elements: unknown; png: string } }) {
+function SaveToCase({ onClose, getPayload, defaultName, defaultCase }: { onClose: () => void; getPayload: () => object; defaultName: string; defaultCase: string | null }) {
   const toast = useToast();
   const router = useRouter();
   const cases = useApi<{ id: number; title: string; status: string }[]>('/cases');
   const [id, setId] = useState('');
   const [title, setTitle] = useState('');
+  const [name, setName] = useState(defaultName);
+  const [remarks, setRemarks] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const open = (cases.data ?? []).filter((c) => c.status === 'open');
-  useEffect(() => { if (cases.data && !id) setId(open[0] ? String(open[0].id) : 'new'); }, [cases.data]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (cases.data && !id) setId(defaultCase && open.some((c) => String(c.id) === defaultCase) ? defaultCase : open[0] ? String(open[0].id) : 'new'); }, [cases.data]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
-    <Modal title="Save graph to case" onClose={onClose} footer={<><Button onClick={onClose}>Cancel</Button><Button variant="primary" busy={busy} onClick={async () => {
+    <Modal title="Save graph snapshot to case" onClose={onClose} footer={<><Button onClick={onClose}>Cancel</Button><Button variant="primary" busy={busy} onClick={async () => {
       setBusy(true); setErr('');
       try {
         let cid = id;
         if (id === 'new') { if (!title.trim()) throw new Error('Give the new case a title'); cid = String((await api<{ id: number }>('/cases', { body: { title: title.trim() } })).id); }
-        await api(`/cases/${cid}/graph`, { method: 'PUT', body: getPayload() });
-        toast.success('Graph saved to case');
+        if (!name.trim()) throw new Error('Give the snapshot a name');
+        await api(`/cases/${cid}/graphs`, { body: { ...getPayload(), name: name.trim(), remarks } });
+        toast.success('Graph snapshot saved to case');
         router.push(`/cases/${cid}`);
       } catch (e) { setErr((e as Error).message); setBusy(false); }
     }}>Save</Button></>}>
       <div className="stack">
-        <p className="muted small">Saves the current wallets, links and a snapshot image. It replaces any graph already saved on that case.</p>
+        <p className="muted small">Saves the current wallets, links and a picture as a new snapshot. Snapshots already saved on the case are kept.</p>
         {cases.error && <Notice tone="warn">Could not load cases: {cases.error}</Notice>}
         <Field label="Case"><Select value={id} onChange={(e) => setId(e.target.value)}>{open.map((c) => <option key={c.id} value={c.id}>{c.title}</option>)}<option value="new">+ Create new case…</option></Select></Field>
         {id === 'new' && <Field label="New case title"><Input value={title} onChange={(e) => setTitle(e.target.value)} autoFocus /></Field>}
+        <Field label="Snapshot name"><Input value={name} maxLength={200} onChange={(e) => setName(e.target.value)} /></Field>
+        <Field label="Remarks (optional)" hint="What this graph shows, why it was saved."><Textarea rows={4} maxLength={5000} value={remarks} onChange={(e) => setRemarks(e.target.value)} /></Field>
         {err && <Notice tone="error">{err}</Notice>}
       </div>
     </Modal>

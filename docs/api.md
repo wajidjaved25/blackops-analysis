@@ -122,11 +122,11 @@ Admins can create **custom roles** with any subset (cannot grant a permission th
 |---|---|---|
 | GET | `/watchlists` | `[{ id, name, createdAt, items, rules, openAlerts }]` |
 | POST | `/watchlists` | `{ name }` |
-| GET | `/watchlists/:id` | `{ id, name, items: [{ id, chain, address, note, lastSeenTs, lastCheckedAt, _count: { alerts } }], rules: Rule[] }` |
+| GET | `/watchlists/:id` | `{ id, name, items: [{ id, chain, address, note, lastSeenTs, lastCheckedAt, lastRiskScore, lastRiskLevel, lastRiskAt, lastRiskState, _count: { alerts } }], rules: Rule[] }` (`lastRisk*` = the last `risk_change` re-score; null until the first one) |
 | DELETE | `/watchlists/:id` | |
 | POST | `/watchlists/:id/items` | `{ addresses?: string[], csv?: string, note?, chain? }` → `{ added, skipped }`; `chain` (`eth` default \| `bsc`) applies to the 0x addresses |
 | DELETE | `/watch-items/:id` | |
-| POST | `/watchlists/:id/rules` | `{ type, params }`: `amount_over {amount}` · `flagged_counterparty {minWeight=50}` · `volume_spike {factor=5}`, each with optional `asset: 'usdt'\|'usdc'\|'all'` (default `all`; rules created before 7B have none and watch every asset). Amounts are token units; a volume spike with `all` adds USDT + USDC (USD-equivalent). |
+| POST | `/watchlists/:id/rules` | `{ type, params }`: `amount_over {amount}` · `flagged_counterparty {minWeight=50}` · `volume_spike {factor=5}`, each with optional `asset: 'usdt'\|'usdc'\|'all'` (default `all`; rules created before 7B have none and watch every asset). Amounts are token units; a volume spike with `all` adds USDT + USDC (USD-equivalent). **9B:** `risk_change {minWeight=50}` (asset is always `all`): see Risk-change alerts below. |
 | PATCH | `/rules/:id` | `{ enabled?, params? }` |
 | DELETE | `/rules/:id` | |
 | GET | `/alerts?status=open&watchlistId=&page=0&asset=all` | `asset=usdt\|usdc` filters on `Alert.asset` (`all` = no filter; an alert from a rule that spans every asset, e.g. a volume spike, has `asset: 'all'` and only shows under All). `Alert` gains `asset: 'usdt'\|'usdc'\|'all'`; non-USDT alert `dedupKey` = `<hash>:<asset>`. `{ rows: [Alert & { rule: { type }, watchItem: { note, watchlist: { id, name } } }], total, page, pageSize: 50 }` |
@@ -145,7 +145,7 @@ Webhook: POST JSON `{ event: 'alert.created', alert }`, header `X-USDT-Trace-Sig
 |---|---|---|
 | GET | `/cases?status=` | `[{ id, title, status, createdAt, updatedAt, addresses: number, notes: number, files: number }]` |
 | POST | `/cases` | `{ title, description? }` → Case |
-| GET | `/cases/:id` | `{ id, title, description, status, createdAt, updatedAt, graphJson, graphPng, addresses: CaseAddress[], notes: [{ id, body, authorId, author, createdAt }], files: [{ id, name, size, mime, createdAt }] }` |
+| GET | `/cases/:id` | `{ id, title, description, status, createdAt, updatedAt, graphs: GraphSummary[], addresses: CaseAddress[], notes: [{ id, body, authorId, author, createdAt }], files: [{ id, name, size, mime, createdAt }] }` |
 | PATCH | `/cases/:id` | `{ title?, description?, status?: open\|closed }` |
 | DELETE | `/cases/:id` | admin |
 | POST | `/cases/:id/addresses` | `{ address, chain?, role: suspect\|victim\|exchange\|intermediary\|other, note? }` — `chain` `eth` (default) \| `bsc`; the case stores the chain per address (that is how a case "remembers" Ethereum vs BNB Chain). A saved graph payload carries its `chain` for the same reason. |
@@ -156,9 +156,15 @@ Webhook: POST JSON `{ event: 'alert.created', alert }`, header `X-USDT-Trace-Sig
 | POST | `/cases/:id/files` | multipart field `file`, max 20 MB |
 | GET | `/case-files/:id` | download |
 | DELETE | `/case-files/:id` | |
-| PUT | `/cases/:id/graph` | `{ elements: CytoscapeElementsJson, png: 'data:image/png;base64,…' }` (≤ 8 MB) |
-| GET | `/cases/:id/timeline` | `[{ hash, from, to, amount, asset, timestamp, hop }]` — USDT and USDC transfers between the case's addresses (+ saved graph nodes), oldest first; `hop` = distance from the first victim/suspect |
-| GET | `/cases/:id/report` | `{ case, addresses: [CaseAddress & { risk: { score, level, reasons } }], timeline, totals: { transfers, volume }, generatedAt, generatedBy }` (for the printable report page; audited) |
+| GET | `/cases/:id/graphs` | `cases.view`. **9B** graph snapshots, newest first: `GraphSummary[]` = `{ id, name, remarks, chain, rootAddress, depth, filters, nodeCount, edgeCount, hasImage, author, createdAt, updatedAt }` (no graph JSON / image). |
+| POST | `/cases/:id/graphs` | `cases.manage`. `{ name (required, ≤ 200), remarks? (multiline, ≤ 5000), elements: CytoscapeElementsJson, png?: 'data:image/png;base64,…' (≤ 8 MB), depth? (1–3), filters? { fanout, from, to, min, asset } }` → the new `GraphSummary` (201). Always a NEW snapshot; nothing is overwritten. Counts, root and chain are derived from `elements`. Audited `case.graph.save`. |
+| PUT | `/cases/:id/graph` | Legacy alias of the above for older clients: `{ elements, png?, name? }`; now also creates a NEW snapshot (name generated when absent). It no longer replaces anything and `Case.graphJson` is no longer written. |
+| GET | `/cases/:id/graphs/latest` | `cases.view`. The newest snapshot in full (404 when none). |
+| GET | `/case-graphs/:id` | `cases.view`. One snapshot in full: `GraphSummary` fields + `graphJson`, `graphPng`. Org-scoped through the case (404 otherwise). |
+| PATCH | `/case-graphs/:id` | `cases.manage`. `{ name?, remarks? }` only; the graph is never edited. Audited `case.graph.update`. |
+| DELETE | `/case-graphs/:id` | `cases.manage`. Audited `case.graph.delete`. Deleting a case cascades to its snapshots. |
+| GET | `/cases/:id/timeline` | **9B shape change:** `{ transfers: [{ hash, from, to, amount, asset, timestamp, hop }], warnings: string[] }` (was a bare array) — USDT and USDC transfers between the case's addresses and the wallets of ALL its graph snapshots (de-duplicated), oldest first; `hop` = distance from the first victim/suspect. Bounded: ≤ 25 wallets, 4 read at once, 25 s per wallet, 120 s in total; wallets that time out, fail or are not reached are listed in `warnings` and the rest is still returned. |
+| GET | `/cases/:id/report` | `{ case, addresses: [CaseAddress & { risk: { score, level, reasons } }], graphs: [GraphSummary & { image }] (all snapshots; `image` data URL only for the newest 6), timeline, totals: { transfers, volume }, generatedAt, generatedBy }` (for the printable report page; audited) |
 | GET | `/cases/:id/transfers.csv` | timeline as CSV |
 | GET | `/cases/:id/transactions?status=&q=&limit=200&offset=0` | `cases.view`. `{ summary: { total, pending, byStatus: { <status>: { count, amount } }, claimed, verified }, count, rows: CaseTx[] }`; `CaseTx` = `{ id, chain, hash, source: manual\|import, fileId, rowNo, claimedAt, coin, network, amount, fee, address, ref, status, onFrom, onTo, onAmount, onAsset, onAt, reasons: string[], verifiedAt }`. `status` = `pending\|verified\|mismatch\|not_found\|off_chain\|error`; `q` = substring of hash, address or exchange reference; `limit` max 1000. `claimed`/`verified` are sums of `amount` (USDT + USDC, both about one dollar). Poll while `summary.pending > 0`. |
 | POST | `/cases/:id/transactions` | `cases.manage`. Paste: `{ hashes: string \| string[], chain?: eth\|bsc, timeTolMin? }` (one per line / whitespace / comma; max 200). Tron = 64 hex; `0x` + 64 hex is Ethereum unless `chain=bsc`. -> `{ added, skipped: [{ value, reason }], jobId }`: invalid and duplicate hashes are skipped, not an error. Each added row is verified by a background job. |
@@ -282,3 +288,6 @@ Off by default: `AI_ENABLED=false`. While off, every `/ai/*` endpoint except `GE
 - Errors: `503 ai_disabled`, `503 ai_not_configured` (enabled but no `ANTHROPIC_API_KEY`), `429 ai_rate_limited` (20 calls / 10 min per user), `502 ai_upstream` (provider error text is not forwarded).
 - Safety: the context is a bounded JSON (max 24,000 chars, max 900 output tokens) inside an `<untrusted_data>` block with `<`/`>` escaped; label names and notes are sanitised and length-capped; the system prompt forbids following instructions in the data, requires citations, "not in the data" for unknowns and no real-world identity claims. Results are cached 1 h per input hash (includes org). The audit log records `ai.address_summary|case_summary|ask`, target, model, cached, token counts, context size; never prompts, questions or answers.
 - Env: `AI_ENABLED`, `ANTHROPIC_API_KEY`, `AI_MODEL` (default `claude-sonnet-5-5`).
+
+### Risk-change alerts (Phase 9B)
+A watchlist with an enabled `risk_change` rule has each of its wallets re-scored with `RiskService.assess` (not deep, the same score as the address page), at most once per `RISK_RECHECK_SEC` (default 3600) per watched wallet and at most `RISK_MAX_PER_POLL` (default 5, longest-waiting first) wallets per monitoring pass. The score, level, time and a small state (`frozen`, `sanctioned`, `highRiskLabel`, flagged counterparties with their weights) are stored on the `WatchItem` (`lastRisk*`). The first re-score is only a baseline. An `Alert` (`asset: 'all'`, `dedupKey: risk:<ms>`) is raised through the normal inbox / email / webhook pipeline when, compared with the stored state: the level rises (low < medium < high < severe); the wallet becomes frozen, sanctioned or labelled high-risk (a label of weight >= 80, e.g. scam, mixer, ransomware); or a direct counterparty with a risk weight >= the rule's `minWeight` appears that was not flagged at that weight before. A drop in risk never alerts. `detail` carries the reasons and the before / after, e.g. `Risk change: risk level rose from Low (5) to Severe (90); the wallet is now labelled high-risk. Before: Low (5). Now: Severe (90). Reasons now: Labelled scam: ...`.

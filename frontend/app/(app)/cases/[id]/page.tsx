@@ -1,5 +1,5 @@
 'use client';
-import { Download, FileText, Network, Plus, Printer, Trash2, Upload } from 'lucide-react';
+import { Download, FileText, Plus, Printer, Trash2, Upload } from 'lucide-react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { useState } from 'react';
@@ -10,6 +10,7 @@ import { AddressLink, RiskBadge, TxLink } from '@/components/Risk';
 import { Table } from '@/components/Table';
 import { AnalysisTab } from '@/components/CaseAnalysis';
 import { TransactionsTab } from '@/components/CaseTransactions';
+import { GraphRow, GraphsTab } from '@/components/CaseGraphs';
 import { useToast } from '@/components/Toast';
 import { RadialHeatmap } from '@/components/charts';
 import { Badge, Button, Card, DateTime, EmptyState, ErrorState, Field, Input, LinkButton, Notice, PageHeader, Select, SkeletonRows, Tabs, Textarea, Time } from '@/components/ui';
@@ -20,7 +21,7 @@ import { Chain, chainQ, detectChain, money, short } from '@/lib/format';
 import { useApi } from '@/lib/hooks';
 
 interface CA { id: number; chain: string; address: string; role: string; note?: string }
-interface Case { id: number; title: string; description?: string; status: string; createdAt: string; updatedAt: string; graphJson?: unknown; graphPng?: string; addresses: CA[]; notes: { id: number; body: string; author?: { name?: string; email?: string } | string; createdAt: string }[]; files: { id: number; name: string; size: number; mime: string; createdAt: string }[] }
+interface Case { id: number; title: string; description?: string; status: string; createdAt: string; updatedAt: string; graphs: GraphRow[]; addresses: CA[]; notes: { id: number; body: string; author?: { name?: string; email?: string } | string; createdAt: string }[]; files: { id: number; name: string; size: number; mime: string; createdAt: string }[] }
 interface TL { hash: string; from: string; to: string; amount: number; asset?: string; timestamp: number; hop: number | null }
 type Tab = 'overview' | 'addresses' | 'transactions' | 'analysis' | 'graph' | 'timeline' | 'notes' | 'files';
 const authorName = (a: Case['notes'][number]['author']) => (typeof a === 'string' ? a : a?.name || a?.email || 'Unknown');
@@ -55,7 +56,7 @@ export default function CaseDetail() {
         {error && <div className="card"><ErrorState error={error} status={status} onRetry={reload} /></div>}
         {c && (
           <>
-            <Tabs value={tab} onChange={setTab} tabs={[{ id: 'overview', label: 'Overview' }, { id: 'addresses', label: 'Addresses', count: c.addresses.length }, { id: 'transactions', label: 'Transactions' }, { id: 'analysis', label: 'Analysis' }, { id: 'graph', label: 'Graph' }, { id: 'timeline', label: 'Timeline' }, { id: 'notes', label: 'Notes', count: c.notes.length }, { id: 'files', label: 'Files', count: c.files.length }]} />
+            <Tabs value={tab} onChange={setTab} tabs={[{ id: 'overview', label: 'Overview' }, { id: 'addresses', label: 'Addresses', count: c.addresses.length }, { id: 'transactions', label: 'Transactions' }, { id: 'analysis', label: 'Analysis' }, { id: 'graph', label: 'Graph', count: c.graphs.length }, { id: 'timeline', label: 'Timeline' }, { id: 'notes', label: 'Notes', count: c.notes.length }, { id: 'files', label: 'Files', count: c.files.length }]} />
             <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`}>
               {tab === 'overview' && (
                 <Card title="Overview" actions={manage && !edit && <Button sm onClick={() => setEdit({ title: c.title, description: c.description ?? '' })}>Edit</Button>}>
@@ -76,11 +77,7 @@ export default function CaseDetail() {
               {tab === 'addresses' && <Addresses c={c} manage={manage} act={act} />}
               {tab === 'transactions' && <TransactionsTab id={id} />}
               {tab === 'analysis' && <AnalysisTab id={id} />}
-              {tab === 'graph' && (
-                <Card title="Graph snapshot" actions={<LinkButton href={`/graph?case=${id}`} variant="primary" sm disabled={!c.graphJson}><Network size={14} />Open in graph</LinkButton>}>
-                  {c.graphPng ? <img src={c.graphPng} alt="Saved fund-flow graph" style={{ maxWidth: '100%', borderRadius: 8, border: '1px solid var(--border)' }} /> : <EmptyState icon={<Network size={22} />} title="No graph saved" action={<LinkButton href="/graph" sm>Open graph workspace</LinkButton>}>Build a graph in the workspace and use “Save to case”.</EmptyState>}
-                </Card>
-              )}
+              {tab === 'graph' && <GraphsTab caseId={id} graphs={c.graphs} manage={manage} reload={reload} />}
               {tab === 'timeline' && <Timeline id={id} addrs={c.addresses} />}
               {tab === 'notes' && <Notes c={c} manage={manage} act={act} />}
               {tab === 'files' && <Files c={c} manage={manage} act={act} />}
@@ -90,7 +87,7 @@ export default function CaseDetail() {
         {del && <ConfirmDialog title="Delete case" busy={busy} onClose={() => setDel(false)} onConfirm={async () => {
           setBusy(true);
           try { await api(`/cases/${id}`, { method: 'DELETE' }); toast.success('Case deleted'); router.push('/cases'); } catch (e) { toast.error((e as Error).message); setBusy(false); }
-        }}>Permanently delete <b>{c?.title}</b> with all its addresses, notes, files and graph?</ConfirmDialog>}
+        }}>Permanently delete <b>{c?.title}</b> with all its addresses, notes, files and graph snapshots?</ConfirmDialog>}
       </div>
     </RequirePerm>
   );
@@ -140,17 +137,21 @@ function Addresses({ c, manage, act }: { c: Case; manage: boolean; act: Act }) {
 
 function Timeline({ id, addrs }: { id: string; addrs: CA[] }) {
   const { can } = useAuth();
-  const { data: all, loading, error, status, reload } = useApi<TL[]>(`/cases/${id}/timeline`);
+  const res = useApi<{ transfers: TL[]; warnings: string[] }>(`/cases/${id}/timeline`);
+  const { loading, error, status, reload } = res;
+  const all = res.data?.transfers;
+  const warnings = res.data?.warnings ?? [];
   const [full, setFull] = useState(false);
   const data = all && !full ? all.slice(0, 80) : all;
   if (loading) return <div className="card"><SkeletonRows /></div>;
   if (error) return <div className="card"><ErrorState error={error} status={status} onRetry={reload} /></div>;
-  if (!data?.length) return <div className="card"><EmptyState title="No transfers between the case addresses yet">The storyline shows USDT and USDC moving between the wallets in this case (and its saved graph), oldest first. Add more addresses or save a graph.</EmptyState></div>;
+  if (!data?.length) return <div className="stack">{warnings.length > 0 && <Notice tone="warn">Some wallets could not be read, so this may be incomplete: {warnings.join(' · ')}</Notice>}<div className="card"><EmptyState title="No transfers between the case addresses yet">The storyline shows USDT and USDC moving between the wallets in this case (and its saved graph), oldest first. Add more addresses or save a graph.</EmptyState></div></div>;
   const hops = [...new Set(data.map((t) => t.hop))].sort((a, b) => (a ?? 1e9) - (b ?? 1e9));
   return (
     <div className="grid g-main" style={{ alignItems: 'start' }}>
       <Card title="Storyline" actions={can('export.data') && <a className="btn sm" href={`/api/cases/${id}/transfers.csv`} download><Download size={14} />CSV</a>}>
         <div className="stack">
+          {warnings.length > 0 && <Notice tone="warn">Some wallets could not be read, so this storyline may be incomplete: {warnings.join(' · ')}</Notice>}
           <p className="muted small">Money movement in order. “Hop” counts how many steps a wallet is from the first victim or suspect.</p>
           {hops.map((h) => (
             <section key={h} className="stack sm">

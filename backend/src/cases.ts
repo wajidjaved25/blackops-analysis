@@ -10,14 +10,19 @@ import { CurrentCtx, Perm } from './auth';
 import { Chain, getTransfers, norm } from './chains';
 import { audit, Ctx, Db } from './db';
 import { RiskService } from './risk';
-import { graphAddresses, pickSources, timelineHops } from './timeline';
-import { found, id, oneOf, parseAddr, str, toCsv } from './util';
+import { boundedMap, graphAddresses, graphStats, pickSources, timelineHops } from './timeline';
+import { found, id, int, oneOf, parseAddr, str, toCsv } from './util';
 
 export const ROLES = ['suspect', 'victim', 'exchange', 'intermediary', 'other'] as const;
 const STATUSES = ['open', 'closed'] as const;
 const MAX_FILE = 20 * 1024 * 1024;
 const MAX_PNG = 8 * 1024 * 1024;
 const MAX_TIMELINE_ADDRESSES = 25; // each address is a live chain-API call
+const TIMELINE_CONCURRENCY = 4; // wallets read at once
+const TIMELINE_WALLET_MS = 25_000; // one slow wallet is skipped (with a warning) after this
+const TIMELINE_TOTAL_MS = 120_000; // wallets not started by then are skipped; the Next proxy allows 170 s
+const MAX_REPORT_IMAGES = 6; // snapshot images embedded in the report JSON (they are large): the newest few
+const GRAPH_COLS = { id: true, name: true, remarks: true, chain: true, rootAddress: true, depth: true, filters: true, nodeCount: true, edgeCount: true, createdById: true, createdAt: true, updatedAt: true } as const;
 export const UPLOAD_DIR = resolve(process.env.UPLOAD_DIR || 'uploads');
 
 /** Allowed upload types. The stored mime comes from here, never from the client; magic bytes catch renamed files. */
@@ -71,27 +76,48 @@ export class CasesService {
     return found(await this.db.case.findFirst({ where: { id: id(raw), orgId: ctx.orgId } }), 'Case not found');
   }
 
-  /** Stablecoin (USDT / USDC) transfers between the case's wallets (case addresses + wallets in the saved graph), with hop numbers. */
-  async timeline(c: { id: number; graphJson: unknown }) {
+  /** Summary rows of a case's graph snapshots (no graph JSON, no image), newest first, with the author's name. */
+  async graphList(ctx: Ctx, caseId: number) {
+    const rows = await this.db.caseGraph.findMany({ where: { caseId }, orderBy: { createdAt: 'desc' }, select: { ...GRAPH_COLS, graphPng: true } });
+    const users = await this.db.user.findMany({ where: { orgId: ctx.orgId, id: { in: rows.map((r) => r.createdById).filter((x): x is number => x !== null) } }, select: { id: true, name: true } });
+    const who = new Map(users.map((u) => [u.id, u.name]));
+    return rows.map(({ graphPng, createdById, ...g }) => ({ ...g, hasImage: !!graphPng, author: createdById ? who.get(createdById) ?? null : null }));
+  }
+
+  /** Stablecoin (USDT / USDC) transfers between the case's wallets (case addresses + wallets in ALL its graph snapshots, de-duplicated), with hop numbers. Bounded: at most 4 wallets at once, 25 s per wallet, 120 s in total; what could not be read is listed in `warnings`. */
+  async timeline(c: { id: number }) {
     const warnings: string[] = [];
-    const addrs = await this.db.caseAddress.findMany({ where: { caseId: c.id }, orderBy: { id: 'asc' } });
-    const all = [...addrs.map((a) => ({ chain: a.chain as Chain, address: a.address })), ...graphAddresses(c.graphJson).map((a) => ({ chain: parseAddr(a, (c.graphJson as any)?.chain).chain, address: a }))]; // a saved graph carries its chain (eth | bsc), older ones are Ethereum
+    const [addrs, graphs] = await Promise.all([
+      this.db.caseAddress.findMany({ where: { caseId: c.id }, orderBy: { id: 'asc' } }),
+      this.db.caseGraph.findMany({ where: { caseId: c.id }, orderBy: { id: 'asc' }, select: { chain: true, graphJson: true } }),
+    ]);
+    const all = addrs.map((a) => ({ chain: a.chain as Chain, address: a.address }));
+    for (const g of graphs) {
+      for (const a of graphAddresses(g.graphJson)) {
+        try {
+          all.push({ chain: parseAddr(a, g.chain).chain, address: a }); // a snapshot carries its chain (tron | eth | bsc)
+        } catch {
+          all.push({ chain: parseAddr(a).chain, address: a });
+        }
+      }
+    }
     const seen = new Set<string>();
-    const wallets = all.filter((w) => !seen.has(w.chain + w.address) && seen.add(w.chain + w.address));
+    const wallets = all.filter((w) => !seen.has(w.chain + norm(w.address)) && seen.add(w.chain + norm(w.address)));
     if (wallets.length > MAX_TIMELINE_ADDRESSES) warnings.push(`Only the first ${MAX_TIMELINE_ADDRESSES} of ${wallets.length} wallets were checked for transfers`);
     const checked = wallets.slice(0, MAX_TIMELINE_ADDRESSES);
 
     const inCase = new Set(checked.map((w) => w.chain + norm(w.address)));
     const rows = new Map<string, { hash: string; from: string; to: string; amount: number; asset: string; timestamp: number }>();
-    for (const w of checked) {
-      try {
-        for (const t of await getTransfers(w.chain, w.address, 500, false, 'case')) {
-          if (inCase.has(w.chain + norm(t.from)) && inCase.has(w.chain + norm(t.to))) rows.set(`${t.asset}|${t.hash}|${t.from}|${t.to}|${t.amount}`, t);
-        }
-      } catch (e) {
-        warnings.push(`${w.address}: ${(e as Error).message}`);
-      }
-    }
+    const r = await boundedMap(
+      checked,
+      TIMELINE_CONCURRENCY,
+      TIMELINE_WALLET_MS,
+      Date.now() + TIMELINE_TOTAL_MS,
+      async (w) => (await getTransfers(w.chain, w.address, 500, false, 'case')).filter((t) => inCase.has(w.chain + norm(t.from)) && inCase.has(w.chain + norm(t.to))),
+      (w) => w.address,
+    );
+    for (const list of r.done) for (const t of list) rows.set(`${t.asset}|${t.hash}|${t.from}|${t.to}|${t.amount}`, t);
+    warnings.push(...r.warnings);
     const sources = pickSources(addrs.map((a) => ({ address: norm(a.address), role: a.role })));
     return { transfers: timelineHops([...rows.values()].map((t) => ({ ...t, from: norm(t.from), to: norm(t.to) })), sources), warnings };
   }
@@ -134,10 +160,11 @@ export class CasesController {
   @Get('cases/:id')
   async get(@CurrentCtx() ctx: Ctx, @Param('id') raw: string) {
     const c = await this.cases.own(ctx, raw);
-    const [addresses, notes, files] = await Promise.all([
+    const [addresses, notes, files, graphs] = await Promise.all([
       this.db.caseAddress.findMany({ where: { caseId: c.id }, orderBy: { id: 'asc' } }),
       this.db.caseNote.findMany({ where: { caseId: c.id }, orderBy: { id: 'desc' } }),
       this.db.caseFile.findMany({ where: { caseId: c.id }, orderBy: { id: 'desc' } }),
+      this.cases.graphList(ctx, c.id),
     ]);
     const users = await this.db.user.findMany({ where: { orgId: ctx.orgId, id: { in: notes.map((n) => n.authorId).filter((x): x is number => x !== null) } }, select: { id: true, name: true } });
     const who = new Map(users.map((u) => [u.id, u.name]));
@@ -148,8 +175,7 @@ export class CasesController {
       status: c.status,
       createdAt: c.createdAt,
       updatedAt: c.updatedAt,
-      graphJson: c.graphJson,
-      graphPng: c.graphPng,
+      graphs,
       addresses: addresses.map(addrView),
       notes: notes.map((n) => ({ id: n.id, body: n.body, authorId: n.authorId, author: n.authorId ? who.get(n.authorId) ?? null : null, createdAt: n.createdAt })),
       files: files.map((f) => ({ id: f.id, name: f.name, size: f.size, mime: f.mime, createdAt: f.createdAt })),
@@ -292,11 +318,31 @@ export class CasesController {
     return { ok: true };
   }
 
-  // ----- graph snapshot -----
+  // ----- graph snapshots (9B): many named snapshots per case; saving never overwrites -----
+  @Perm('cases.view')
+  @Get('cases/:id/graphs')
+  async graphs(@CurrentCtx() ctx: Ctx, @Param('id') raw: string) {
+    return this.cases.graphList(ctx, (await this.cases.own(ctx, raw)).id);
+  }
+
+  /** Body: { name, remarks?, elements, png?, depth?, filters? }. */
+  @Perm('cases.manage')
+  @Post('cases/:id/graphs')
+  async addGraph(@CurrentCtx() ctx: Ctx, @Param('id') raw: string, @Body() b: any) {
+    const c = await this.cases.own(ctx, raw);
+    return this.saveGraph(ctx, c.id, b, str(b.name, 'name', { max: 200 }));
+  }
+
+  /** Kept for older clients: saves a NEW snapshot with a generated name (it no longer replaces anything). */
   @Perm('cases.manage')
   @Put('cases/:id/graph')
-  async saveGraph(@CurrentCtx() ctx: Ctx, @Param('id') raw: string, @Body() b: any) {
+  async putGraph(@CurrentCtx() ctx: Ctx, @Param('id') raw: string, @Body() b: any) {
     const c = await this.cases.own(ctx, raw);
+    const st = graphStats(b?.elements);
+    return this.saveGraph(ctx, c.id, b, str(b?.name, 'name', { optional: true, max: 200 }) || `Graph ${st.root ? st.root.slice(0, 8) + '… ' : ''}${new Date().toISOString().slice(0, 10)}`);
+  }
+
+  private async saveGraph(ctx: Ctx, caseId: number, b: any, name: string) {
     if (!b.elements || typeof b.elements !== 'object') throw new BadRequestException('elements must be Cytoscape elements JSON');
     let png: string | null = null;
     if (b.png !== undefined && b.png !== null) {
@@ -305,8 +351,54 @@ export class CasesController {
       }
       png = b.png;
     }
-    await this.db.case.update({ where: { id: c.id }, data: { graphJson: b.elements, graphPng: png } });
-    await audit(this.db, ctx, 'case.graph.save', `case:${c.id}`, { nodes: graphAddresses(b.elements).length });
+    const st = graphStats(b.elements);
+    const f = b.filters && typeof b.filters === 'object' ? b.filters : {};
+    const filters = Object.fromEntries(['fanout', 'from', 'to', 'min', 'asset'].filter((k) => ['string', 'number'].includes(typeof f[k])).map((k) => [k, f[k]]));
+    const g = await this.db.caseGraph.create({
+      data: { caseId, name, remarks: str(b.remarks, 'remarks', { optional: true, max: 5000 }), chain: st.chain, rootAddress: st.root, depth: b.depth === undefined || b.depth === null ? null : int(b.depth, 1, 1, 3), filters, graphJson: b.elements, graphPng: png, nodeCount: st.nodes, edgeCount: st.edges, createdById: ctx.userId },
+      select: GRAPH_COLS,
+    });
+    await audit(this.db, ctx, 'case.graph.save', `case:${caseId}`, { graph: g.id, name, nodes: st.nodes });
+    return g;
+  }
+
+  private async ownGraph(ctx: Ctx, raw: string) {
+    return found(await this.db.caseGraph.findFirst({ where: { id: id(raw), case: { orgId: ctx.orgId } } }), 'Graph not found');
+  }
+
+  /** The newest snapshot of a case, in full (what "Open in graph" loads when no snapshot is named). */
+  @Perm('cases.view')
+  @Get('cases/:id/graphs/latest')
+  async latestGraph(@CurrentCtx() ctx: Ctx, @Param('id') raw: string) {
+    const c = await this.cases.own(ctx, raw);
+    return found(await this.db.caseGraph.findFirst({ where: { caseId: c.id }, orderBy: { createdAt: 'desc' } }), 'No graph saved on this case');
+  }
+
+  @Perm('cases.view')
+  @Get('case-graphs/:id')
+  async graph(@CurrentCtx() ctx: Ctx, @Param('id') raw: string) {
+    return this.ownGraph(ctx, raw);
+  }
+
+  /** Rename and / or edit remarks. The graph itself is never changed. */
+  @Perm('cases.manage')
+  @Patch('case-graphs/:id')
+  async updateGraph(@CurrentCtx() ctx: Ctx, @Param('id') raw: string, @Body() b: any) {
+    const g = await this.ownGraph(ctx, raw);
+    const data: Prisma.CaseGraphUpdateInput = {};
+    if (b.name !== undefined) data.name = str(b.name, 'name', { max: 200 });
+    if (b.remarks !== undefined) data.remarks = str(b.remarks, 'remarks', { optional: true, max: 5000 });
+    const u = await this.db.caseGraph.update({ where: { id: g.id }, data, select: GRAPH_COLS });
+    await audit(this.db, ctx, 'case.graph.update', `case:${g.caseId}`, { graph: g.id, ...data } as object);
+    return u;
+  }
+
+  @Perm('cases.manage')
+  @Delete('case-graphs/:id')
+  async removeGraph(@CurrentCtx() ctx: Ctx, @Param('id') raw: string) {
+    const g = await this.ownGraph(ctx, raw);
+    await this.db.caseGraph.delete({ where: { id: g.id } });
+    await audit(this.db, ctx, 'case.graph.delete', `case:${g.caseId}`, { graph: g.id, name: g.name });
     return { ok: true };
   }
 
@@ -314,18 +406,21 @@ export class CasesController {
   @Perm('cases.view')
   @Get('cases/:id/timeline')
   async timeline(@CurrentCtx() ctx: Ctx, @Param('id') raw: string) {
-    return (await this.cases.timeline(await this.cases.own(ctx, raw))).transfers;
+    return this.cases.timeline(await this.cases.own(ctx, raw)); // { transfers, warnings }
   }
 
   @Perm('export.data')
   @Get('cases/:id/report')
   async report(@CurrentCtx() ctx: Ctx, @Param('id') raw: string) {
     const c = await this.cases.own(ctx, raw);
-    const [addresses, { transfers, warnings }, me] = await Promise.all([
+    const [addresses, { transfers, warnings }, me, graphs, images] = await Promise.all([
       this.db.caseAddress.findMany({ where: { caseId: c.id }, orderBy: { id: 'asc' } }),
       this.cases.timeline(c),
       ctx.userId ? this.db.user.findUnique({ where: { id: ctx.userId }, select: { name: true, email: true } }) : null,
+      this.cases.graphList(ctx, c.id),
+      this.db.caseGraph.findMany({ where: { caseId: c.id, graphPng: { not: null } }, orderBy: { createdAt: 'desc' }, take: MAX_REPORT_IMAGES, select: { id: true, graphPng: true } }),
     ]);
+    const png = new Map(images.map((i) => [i.id, i.graphPng]));
     const withRisk = [];
     for (const a of addresses.slice(0, MAX_TIMELINE_ADDRESSES)) {
       try {
@@ -339,6 +434,7 @@ export class CasesController {
     return {
       case: { id: c.id, title: c.title, description: c.description, status: c.status, createdAt: c.createdAt, updatedAt: c.updatedAt },
       addresses: withRisk,
+      graphs: graphs.map((g) => ({ ...g, image: png.get(g.id) ?? null })),
       timeline: transfers,
       totals: { transfers: transfers.length, volume: transfers.reduce((s, t) => s + t.amount, 0) },
       warnings,
