@@ -3,6 +3,7 @@ import { ArrowRight, ArrowRightLeft, CheckCircle2, ExternalLink, XCircle } from 
 import { useParams, useRouter } from 'next/navigation';
 import { AssetTag } from '@/components/Assets';
 import { RequirePerm } from '@/components/Guard';
+import { InvestigateTx } from '@/components/InvestigateTx';
 import { AddressLink } from '@/components/Risk';
 import { Badge, Card, CopyButton, DateTime, EmptyState, ErrorState, Notice, PageHeader, Segmented, SkeletonRows } from '@/components/ui';
 import { Chain, chainName, explorerTx, money } from '@/lib/format';
@@ -21,6 +22,7 @@ export default function TxPage() {
       <div className="page stack" style={{ gap: 20 }}>
         <PageHeader crumbs={[{ label: 'Investigate', href: '/graph' }, { label: 'Transaction' }]} title={<span className="row" style={{ gap: 10 }}>Transaction {t && <Badge tone="outline">{chainName(t.chain)}</Badge>}{t && (t.success ? <Badge tone="good"><CheckCircle2 size={13} />Success</Badge> : <Badge tone="severe"><XCircle size={13} />Failed</Badge>)}</span>}
           sub={<span className="row nw" style={{ gap: 6 }}><code className="break">{hash}</code><CopyButton value={hash} label="Copy hash" />{ok && <a href={explorerTx(chain as Chain, hash)} target="_blank" rel="noreferrer" aria-label="Open in block explorer"><ExternalLink size={14} /></a>}</span>} />
+        {ok && t && <div className="row"><InvestigateTx chain={t.chain} hash={hash} transfers={t.transfers} /></div>}
         {!ok && <ErrorState error="Chain must be tron, eth or bsc." />}
         {ok && chain !== 'tron' && <Segmented label="Chain" value={chain as 'eth' | 'bsc'} onChange={(c) => router.replace(`/tx/${c}/${hash}`)} options={[{ id: 'eth', label: 'Ethereum' }, { id: 'bsc', label: 'BNB Chain' }]} />}
         {loading && <div className="card"><SkeletonRows rows={4} /></div>}

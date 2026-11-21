@@ -241,6 +241,19 @@ Goal: wallets of Binance and other major exchanges are labelled automatically fr
 
 ---
 
+## Phase 9A — TXID-first investigation, backward tracing, analysis wallets to case
+
+Asked 2026-11-21. No schema change (analysis params and results are JSON), so no migration.
+- [x] **9.1 Investigate from one transaction** — tx page button "Investigate this transaction" (`cases.manage`, `components/InvestigateTx.tsx`): dialog picks an open case or creates one, lists sender(s) (default role suspect) and receiver(s) (default intermediary) with a role selector each (first 50 addresses), then creates the case, bulk-adds the addresses, pastes the hash (8A paste/verify), waits up to ~2 min for verification (the recipient wallet is only known after it), starts an analysis with `direction: both` and opens `/cases/:id?tab=analysis` (the case page now honours `?tab=`). The global search already sends a hash to the tx page, so "Start investigation" lives there.
+- [x] **9.2 Backward tracing** — `trace(..., 'backward')` in `analysis-rules.ts`; `Params.direction` forward|backward|both (API default forward, UI default both). Follows incoming transfers that arrived at or before the time the funds left the wallet, same bounds and endpoints as forward (labelled exchange/service/bridge/dex/risk, capped, busy). Seeds: senders of case transactions (bounded by tx time) + recipient wallets (bounded by last payment), max 30. New findings `source_exchange` and `source_risk_exposure`, a "Sources of funds" card (endpoints + source paths), link-chart edges coloured by direction, report section. `sources.hit` reports source-side bounds. Self-check: ~30 asserts (stops at exchange and sanctioned wallet without fetching them, time ordering, exchange-as-sender, hop / fan-out / wallet-cap / time-budget reporting, chart direction).
+- [x] **9.3 Analysis wallets to case** — per-row "Add to case" and "Add all (N)" with a role selector on the counterparty wallets, endpoints, source endpoints and source paths tables; the note carries the run, hop, amount and path. Backend `POST /cases/:id/addresses/bulk` (max 500, all-or-nothing validation, org-scoped, audited, skips existing and reports how many).
+- [x] **9.4 Docs** — `docs/api.md` (bulk endpoint, `direction`, `sources`, finding types).
+- [x] **9.5 Checks** — `npm run check` passes; frontend `npm run build`; `e2e/investigate.spec.ts` (bulk endpoint rules; tx page -> case -> analysis -> Sources -> Add all). Also `PW_BASE_URL` now sets the Playwright base URL and the teardown target (it was hard-wired to :3000).
+
+**Status (9A, 2026-11-21):** built on branch `wt-a`. Honest limits: the backward trace was exercised on crafted data in the self-check, and end to end only on one public Tron transaction (its sources may be empty); no real exchange-withdrawal source was observed live. A time-ordering bound is per wallet (latest transfer to the next wallet), so a busy intermediate can still pass funds that were not the case funds: findings say so. Each direction gets the full time budget, so a `both` run can take twice as long. Source tracing does not infer deposit addresses.
+
+---
+
 ## Backlog (ideas parked here, not in scope yet)
 
 - Auto-detect other exchange exports (OKX, Bybit, KuCoin) once samples are available.

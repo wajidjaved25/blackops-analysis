@@ -59,11 +59,13 @@ export interface Params {
   nightMin: number;
   tzMin: number; // minutes east of UTC used for "local" hours
   busyTransfers: number; // a wallet whose first fetched page already holds this many transfers is service-scale: reported as an endpoint, not traced further
+  direction: Direction; // forward: where the money went; backward: where it came from (source of funds); both: two traces
 }
+export type Direction = 'forward' | 'backward' | 'both';
 export const MAX_SEEDS = 30; // recipient wallets traced (largest by volume first)
 export const DEFAULT_PARAMS: Params = {
   hops: 2, fanout: 5, maxWallets: 60, budgetSec: 180, thresholds: [10_000, 15_000, 50_000, 100_000], thresholdPct: 0.1,
-  repeatMin: 3, consolidationMin: 3, passShare: 0.9, passHours: 24, nightFrom: 0, nightTo: 6, nightShare: 0.4, nightMin: 5, tzMin: 0, busyTransfers: 200,
+  repeatMin: 3, consolidationMin: 3, passShare: 0.9, passHours: 24, nightFrom: 0, nightTo: 6, nightShare: 0.4, nightMin: 5, tzMin: 0, busyTransfers: 200, direction: 'forward',
 };
 export const LIMITS = { hops: [1, 3], fanout: [1, 10], maxWallets: [10, 150], budgetSec: [30, 600] } as const;
 
@@ -140,7 +142,8 @@ export interface TraceNode {
   hop: number;
   parent: string | null;
   via: Via | null;
-  after: number; // only transfers at or after this time are followed (funds cannot leave before they arrive)
+  after: number; // forward: only transfers at or after this time are followed (funds cannot leave before they arrive). backward: only INCOMING transfers at or before this time (funds cannot come from the future)
+  tag?: string; // seed tag, e.g. 'sender' for the sender of a case transaction
   labels: LabelLite[];
   stop: Stop | null;
   stopReason?: string; // why the trace ends here, shown to the investigator
@@ -173,6 +176,7 @@ export interface TraceDeps {
   onProgress?: (traced: number) => Promise<unknown> | void;
 }
 export interface TraceResult {
+  direction: 'forward' | 'backward';
   nodes: Map<string, TraceNode>;
   edges: TraceEdge[];
   histories: Map<string, Transfer[]>;
@@ -194,15 +198,16 @@ export function stopOf(labels: LabelLite[]): Stop | null {
  * Only transfers made after the funds arrived are followed. Stops at labelled endpoints; an unlabelled wallet that forwards >= 90% of its outflow
  * to a labelled exchange wallet and was paid by >= 3 distinct senders is marked as an inferred deposit address (cluster.ts).
  */
-export async function trace(seeds: { chain: string; address: string; after: number }[], p: Pick<Params, 'hops' | 'fanout' | 'maxWallets' | 'budgetSec' | 'busyTransfers'>, deps: TraceDeps): Promise<TraceResult> {
+export async function trace(seeds: { chain: string; address: string; after: number; tag?: string }[], p: Pick<Params, 'hops' | 'fanout' | 'maxWallets' | 'budgetSec' | 'busyTransfers'>, deps: TraceDeps, dir: 'forward' | 'backward' = 'forward'): Promise<TraceResult> {
+  const back = dir === 'backward';
   const now = deps.now ?? Date.now;
   const deadline = now() + p.budgetSec * 1000;
   const nodes = new Map<string, TraceNode>();
   const edges: TraceEdge[] = [];
   const histories = new Map<string, Transfer[]>();
   const stats: TraceStats = { walletsTotal: 0, walletsTraced: 0, failed: 0, notFollowed: 0, hopLimit: false, fanoutCut: 0, walletCap: false, timedOut: false };
-  const fresh = (chain: string, address: string, hop: number, parent: string | null, via: Via | null, after: number, labels: LabelLite[]): TraceNode => ({
-    key: nodeKey(chain, address), chain, address: norm(address), hop, parent, via, after, labels, stop: stopOf(labels), deposit: null, expanded: false, omitted: 0,
+  const fresh = (chain: string, address: string, hop: number, parent: string | null, via: Via | null, after: number, labels: LabelLite[], tag?: string): TraceNode => ({
+    key: nodeKey(chain, address), chain, address: norm(address), hop, parent, via, after, labels, stop: stopOf(labels), deposit: null, expanded: false, omitted: 0, ...(tag ? { tag } : {}),
   });
   const markBusy = async (chain: string, list: TraceNode[]) => {
     const open = list.filter((x) => !x.stop);
@@ -215,7 +220,7 @@ export async function trace(seeds: { chain: string; address: string; after: numb
   };
   for (const chain of new Set(seeds.map((s) => s.chain))) {
     const labels = await deps.labels(chain, seeds.filter((s) => s.chain === chain).map((s) => s.address));
-    for (const s of seeds.filter((x) => x.chain === chain)) if (!nodes.has(nodeKey(chain, s.address))) nodes.set(nodeKey(chain, s.address), fresh(chain, s.address, 0, null, null, s.after, labels.get(norm(s.address)) ?? []));
+    for (const s of seeds.filter((x) => x.chain === chain)) if (!nodes.has(nodeKey(chain, s.address))) nodes.set(nodeKey(chain, s.address), fresh(chain, s.address, 0, null, null, s.after, labels.get(norm(s.address)) ?? [], s.tag));
     await markBusy(chain, [...nodes.values()].filter((x) => x.chain === chain));
   }
   for (const x of nodes.values()) withReason(x);
@@ -239,9 +244,10 @@ export async function trace(seeds: { chain: string; address: string; after: numb
     }
     const agg = new Map<string, Via>();
     for (const t of trs) {
-      if (norm(t.from) !== n.address || norm(t.to) === n.address || t.timestamp < n.after) continue;
-      const v = agg.get(norm(t.to));
-      if (!v) agg.set(norm(t.to), { amount: t.amount, count: 1, hash: t.hash, first: t.timestamp, last: t.timestamp });
+      const other = back ? norm(t.from) : norm(t.to);
+      if (back ? norm(t.to) !== n.address || other === n.address || t.timestamp > n.after : norm(t.from) !== n.address || other === n.address || t.timestamp < n.after) continue;
+      const v = agg.get(other);
+      if (!v) agg.set(other, { amount: t.amount, count: 1, hash: t.hash, first: t.timestamp, last: t.timestamp });
       else {
         v.amount += t.amount;
         v.count++;
@@ -262,14 +268,14 @@ export async function trace(seeds: { chain: string; address: string; after: numb
           stats.walletCap = true;
           continue;
         }
-        nodes.set(k, fresh(n.chain, addr, n.hop + 1, n.key, via, via.first, labels.get(addr) ?? []));
+        nodes.set(k, fresh(n.chain, addr, n.hop + 1, n.key, via, back ? via.last : via.first, labels.get(addr) ?? []));
         newNodes.push(nodes.get(k)!);
       }
-      edges.push({ from: n.key, to: k, via });
+      edges.push(back ? { from: k, to: n.key, via } : { from: n.key, to: k, via }); // edges always point the way the money flowed
     }
     await markBusy(n.chain, newNodes);
     newNodes.forEach(withReason);
-    if (!n.stop) {
+    if (!n.stop && !back) {
       for (const [addr] of kept) {
         const hot = (labels.get(addr) ?? []).find((l) => l.category === 'exchange' && l.source !== 'cluster');
         const ev = hot && depositEvidence(n.address, trs, addr);
@@ -297,7 +303,7 @@ export async function trace(seeds: { chain: string; address: string; after: numb
   stats.notFollowed = open.length;
   stats.hopLimit = open.some((n) => n.hop >= p.hops);
   stats.walletsTotal = nodes.size;
-  return { nodes, edges, histories, stats };
+  return { direction: dir, nodes, edges, histories, stats };
 }
 
 export interface PathStep {
@@ -371,6 +377,61 @@ export function exchangeFindings(nodes: Map<string, TraceNode>): Finding[] {
       `${paths.length} path${paths.length === 1 ? '' : 's'} from the case recipients end at ${e.name}${direct ? ` (${direct} of them: the statement pays a wallet labelled ${e.name} directly)` : ''}${total > 0 ? `; ${usd(total)} USD-equivalent was sent to the exchange wallet by the previous wallet on the onward paths (not necessarily case funds only)` : ''}. Example: ${first}. Who to contact: ${e.name} holds the account behind ${paths.length === 1 ? 'this deposit' : 'these deposits'}; send legal process or a records request to ${e.name}${inferred ? '. Part of this relies on an inferred deposit address (heuristic): confirm it with the exchange' : ''}${clustered ? '. A deposit address came from an accepted cluster suggestion (heuristic, confidence set by a reviewer)' : ''}.`,
       paths.flatMap((p) => pathEvidence(p)));
   });
+}
+
+// ---------------- backward trace (source of funds) ----------------
+/** Upstream node -> ... -> seed, in the direction the money flowed (the backward trace stores parents towards the seed). */
+export const backPath = (nodes: Map<string, TraceNode>, key: string): PathStep[] => pathTo(nodes, key).reverse();
+const backText = (p: PathStep[]) => p.map(stepText).join(' → ');
+/** Every wallet on a backward path and the transfer that carried funds on to the next wallet. */
+function backEvidence(p: PathStep[]): Evidence[] {
+  const ev: Evidence[] = [];
+  const last = p.length - 1;
+  for (const [i, s] of p.entries()) {
+    const l = s.labels.length ? best(s.labels) : null;
+    ev.push({ kind: 'wallet', chain: s.chain, address: s.address, note: i === last ? 'wallet the case funds arrived at (statement recipient or transaction sender)' : l ? `${l.category}: ${l.name} (label source: ${l.source})` : `${s.hop} hop${s.hop === 1 ? '' : 's'} upstream` });
+    if (s.via?.hash) ev.push({ kind: 'tx', chain: s.chain, hash: s.via.hash, address: s.address, amount: s.via.amount, at: s.via.first, note: `${s.via.count} transfer${s.via.count === 1 ? '' : 's'} to the next wallet, ${usd(s.via.amount)} in total (earliest shown), sent before the funds left the next wallet` });
+  }
+  return ev;
+}
+const isSource = (n: TraceNode) => n.hop > 0 || n.tag === 'sender'; // a statement recipient that is itself an exchange is a destination, not a source
+
+/** Source-side endpoints (exchange, service, bridge, dex, risk, busy), path in flow order: source -> ... -> case wallet. */
+export function sourceEndpoints(nodes: Map<string, TraceNode>, max: number) {
+  return [...nodes.values()].filter((n) => n.stop && isSource(n)).slice(0, max).map((n) => {
+    const l = n.labels[0];
+    return { kind: n.stop, chain: n.chain, address: n.address, name: l?.name ?? null, category: l?.category ?? null, source: l?.source ?? null, reason: n.stopReason, hop: n.hop, amount: n.via?.amount ?? null, path: backText(backPath(nodes, n.key)) };
+  });
+}
+/** Open ends of the backward trace tree (wallets nothing further was followed from) and endpoints: the "paths" of the Sources section. */
+export function sourcePaths(nodes: Map<string, TraceNode>, max: number) {
+  const parents = new Set([...nodes.values()].map((n) => n.parent).filter(Boolean));
+  return [...nodes.values()].filter((n) => n.hop > 0 && !parents.has(n.key)).sort((a, b) => (b.via?.amount ?? 0) - (a.via?.amount ?? 0)).slice(0, max)
+    .map((n) => ({ chain: n.chain, address: n.address, hops: n.hop, amount: n.via?.amount ?? null, end: n.stop ?? (n.expanded ? 'no older incoming transfers within the bounds' : 'not followed further (bound reached)'), path: backText(backPath(nodes, n.key)) }));
+}
+
+/** Funds came from a labelled exchange (the withdrawing account is the lead), or from a risk-labelled wallet. */
+export function sourceFindings(nodes: Map<string, TraceNode>): Finding[] {
+  const out: Finding[] = [];
+  const by = new Map<string, TraceNode[]>();
+  for (const n of nodes.values()) {
+    if (!isSource(n)) continue;
+    const l = n.labels.find((x) => x.category === 'exchange');
+    if (n.stop === 'exchange' && l) by.set(l.name, [...(by.get(l.name) ?? []), n]);
+    if (n.stop === 'risk') {
+      const r = best(n.labels);
+      const p = backPath(nodes, n.key);
+      out.push(mk('source_risk_exposure', 'high', `Funds originated near a ${r.category} wallet`,
+        `${n.address} is labelled ${r.category}: ${r.name} (label source: ${r.source}) and sent funds ${n.hop === 0 ? 'to the case transaction directly' : `${n.hop} hop${n.hop === 1 ? '' : 's'} upstream of a case wallet`}, before those funds moved on: ${backText(p)}. The amount shown is everything that wallet sent to the next one, not necessarily case funds only; "near" means a wallet that sent funds upstream, not proof the case funds are tainted.`, backEvidence(p)));
+    }
+  }
+  for (const [name, ends] of by) {
+    const paths = ends.map((n) => backPath(nodes, n.key));
+    out.push(mk('source_exchange', 'medium', `Funds came from ${name}`,
+      `${paths.length} path${paths.length === 1 ? '' : 's'} trace the case funds back to ${name}. Example: ${backText(paths[0])}. The account that withdrew from ${name} is the lead: send legal process or a records request to ${name} for the withdrawal${paths.length === 1 ? '' : 's'} to the first wallet on ${paths.length === 1 ? 'this path' : 'these paths'}. Amounts are what that wallet sent onward, not necessarily case funds only.`,
+      paths.flatMap(backEvidence)));
+  }
+  return out;
 }
 
 /** Unlabelled wallets that look service-scale (capped index or a full first page): shown as endpoints, never traced further, never inferred to be a specific exchange. */
@@ -491,10 +552,10 @@ export function totals(rows: Row[]) {
   return { rows: rows.length, claimed: sum(() => true), verified: sum((r) => r.status === 'verified'), offChain: { count: rows.filter((r) => r.offChain).length, amount: sum((r) => r.offChain) }, byStatus };
 }
 
-export interface ChartNode { id: string; label: string; kind: 'source' | 'offchain' | 'recipient' | 'onward' | 'busy' | 'exchange' | 'risk' | 'deposit' | 'bridge' | 'dex' | 'service'; chain?: string; address?: string; category?: string; hop?: number }
-export interface ChartEdge { id: string; source: string; target: string; amount: number; count: number }
+export interface ChartNode { id: string; label: string; kind: 'upstream' | 'sender' | 'source' | 'offchain' | 'recipient' | 'onward' | 'busy' | 'exchange' | 'risk' | 'deposit' | 'bridge' | 'dex' | 'service'; chain?: string; address?: string; category?: string; hop?: number }
+export interface ChartEdge { id: string; source: string; target: string; amount: number; count: number; dir?: 'forward' | 'backward' }
 /** Link chart: statement -> recipients -> onward hops -> endpoints. Node count is bounded by MAX_SEEDS + maxWallets + 2. */
-export function linkChart(wallets: WalletRow[], res: TraceResult, offChain: { count: number; amount: number }): { nodes: ChartNode[]; edges: ChartEdge[] } {
+export function linkChart(wallets: WalletRow[], res: TraceResult, offChain: { count: number; amount: number }, back?: TraceResult): { nodes: ChartNode[]; edges: ChartEdge[] } {
   const nodes: ChartNode[] = [{ id: 'statement', label: 'Statement', kind: 'source' }];
   const edges: ChartEdge[] = [];
   if (offChain.count) {
@@ -508,8 +569,18 @@ export function linkChart(wallets: WalletRow[], res: TraceResult, offChain: { co
   }
   for (const w of wallets) {
     const k = nodeKey(w.chain, w.address);
-    if (res.nodes.has(k)) edges.push({ id: `statement>${k}`, source: 'statement', target: k, amount: w.total, count: w.count });
+    if (res.nodes.has(k) || back?.nodes.has(k)) edges.push({ id: `statement>${k}`, source: 'statement', target: k, amount: w.total, count: w.count });
   }
-  for (const e of res.edges) edges.push({ id: `${e.from}>${e.to}`, source: e.from, target: e.to, amount: e.via.amount, count: e.via.count });
+  for (const e of res.edges) edges.push({ id: `${e.from}>${e.to}`, source: e.from, target: e.to, amount: e.via.amount, count: e.via.count, dir: 'forward' });
+  if (back) {
+    const have = new Set(nodes.map((n) => n.id));
+    for (const n of back.nodes.values()) {
+      if (have.has(n.key)) continue;
+      const l = n.labels.length ? best(n.labels) : null;
+      nodes.push({ id: n.key, label: l ? `${l.name}
+${shortA(n.address)}` : shortA(n.address), kind: n.stop ?? (n.tag === 'sender' ? 'sender' : n.hop === 0 ? 'recipient' : 'upstream'), chain: n.chain, address: n.address, category: l?.category, hop: n.hop });
+    }
+    for (const e of back.edges) edges.push({ id: `back:${e.from}>${e.to}`, source: e.from, target: e.to, amount: e.via.amount, count: e.via.count, dir: 'backward' });
+  }
   return { nodes, edges };
 }

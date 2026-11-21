@@ -1,7 +1,7 @@
 'use client';
 import { Download, FileText, Network, Plus, Printer, Trash2, Upload } from 'lucide-react';
 import Link from 'next/link';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { useState } from 'react';
 import { ROLES } from '@/components/AddressActions';
 import { RequirePerm } from '@/components/Guard';
@@ -32,7 +32,9 @@ export default function CaseDetail() {
   const toast = useToast();
   const router = useRouter();
   const { data: c, loading, error, status, reload } = useApi<Case>(`/cases/${id}`);
-  const [tab, setTab] = useState<Tab>('overview');
+  const sp = useSearchParams();
+  const first = sp.get('tab') as Tab | null; // ?tab=analysis opens that tab (used by "Investigate this transaction")
+  const [tab, setTab] = useState<Tab>(first && ['overview', 'addresses', 'transactions', 'analysis', 'graph', 'timeline', 'notes', 'files'].includes(first) ? first : 'overview');
   const manage = can('cases.manage');
   const [edit, setEdit] = useState<{ title: string; description: string } | null>(null);
   const [del, setDel] = useState(false);
@@ -75,7 +77,7 @@ export default function CaseDetail() {
               )}
               {tab === 'addresses' && <Addresses c={c} manage={manage} act={act} />}
               {tab === 'transactions' && <TransactionsTab id={id} />}
-              {tab === 'analysis' && <AnalysisTab id={id} />}
+              {tab === 'analysis' && <AnalysisTab id={id} onAdded={reload} />}
               {tab === 'graph' && (
                 <Card title="Graph snapshot" actions={<LinkButton href={`/graph?case=${id}`} variant="primary" sm disabled={!c.graphJson}><Network size={14} />Open in graph</LinkButton>}>
                   {c.graphPng ? <img src={c.graphPng} alt="Saved fund-flow graph" style={{ maxWidth: '100%', borderRadius: 8, border: '1px solid var(--border)' }} /> : <EmptyState icon={<Network size={22} />} title="No graph saved" action={<LinkButton href="/graph" sm>Open graph workspace</LinkButton>}>Build a graph in the workspace and use “Save to case”.</EmptyState>}

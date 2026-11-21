@@ -11,9 +11,9 @@ import { LabelsService } from './labels';
 import { RiskService } from './risk';
 import {
   bySeverity, busyFindings, consolidations, DEFAULT_PARAMS, exchangeFindings, exposureFindings, Finding, internalTransfers, LIMITS, linkChart, MAX_SEEDS, nearThreshold, nodeKey, Params, passThroughFindings,
-  pathText, pathTo, repeatedAmounts, Row, stopOf, totals, trace, unusualHours, walletTable,
+  pathText, pathTo, repeatedAmounts, Row, sourceEndpoints, sourceFindings, sourcePaths, stopOf, totals, trace, TraceResult, TraceStats, unusualHours, walletTable,
 } from './analysis-rules';
-import { found, id, int } from './util';
+import { found, id, int, oneOf } from './util';
 
 const MAX_TIMELINE = 500;
 const MAX_ENDPOINTS = 100;
@@ -38,8 +38,18 @@ export function parseParams(b: Record<string, unknown>): Params {
     thresholds: th, thresholdPct: num(b.thresholdPct, d.thresholdPct, 0.01, 5), repeatMin: int(b.repeatMin, d.repeatMin, 2, 100), consolidationMin: int(b.consolidationMin, d.consolidationMin, 2, 100),
     passShare: num(b.passShare, d.passShare, 0.5, 1), passHours: num(b.passHours, d.passHours, 1, 720), nightFrom: int(b.nightFrom, d.nightFrom, 0, 23), nightTo: int(b.nightTo, d.nightTo, 0, 24),
     nightShare: num(b.nightShare, d.nightShare, 0.1, 1), nightMin: int(b.nightMin, d.nightMin, 1, 1000), tzMin: int(b.tzMin, d.tzMin, -720, 840), busyTransfers: int(b.busyTransfers, d.busyTransfers, 50, 500),
+    direction: oneOf(b.direction ?? d.direction, 'direction', ['forward', 'backward', 'both'] as const),
   };
 }
+
+/** Which bounds a trace reached, in words (shown in the partial-result notice). */
+const boundsHit = (s: TraceStats, p: Params) => [
+  s.hopLimit && `hop limit (${p.hops}) reached: wallets at the last hop were not followed`,
+  s.fanoutCut > 0 && `fan-out cap (${p.fanout} per wallet) cut the counterparties of ${s.fanoutCut} wallet(s)`,
+  s.walletCap && `wallet cap (${p.maxWallets} wallets) reached: further wallets were dropped`,
+  s.timedOut && `time budget (${p.budgetSec} s) ran out: ${s.notFollowed} discovered wallet(s) were not traced`,
+  s.failed > 0 && `${s.failed} wallet(s) could not be read from the chain`,
+].filter(Boolean) as string[];
 
 const view = (a: CaseAnalysis, withResult: boolean) => ({
   id: a.id, caseId: a.caseId, status: a.status, stage: a.stage, params: a.params, progress: a.progress, total: a.total, error: a.error, createdAt: a.createdAt, finishedAt: a.finishedAt,
@@ -102,19 +112,16 @@ export class CaseAnalysisController implements OnModuleInit {
     await report(0, 'checking Binance proof-of-reserves');
     await porCheck(all, 'recipient wallet(s)');
 
-    await report(0, 'tracing wallets');
-    const res = await trace(seeds.map((w) => ({ chain: w.chain, address: w.address, after: w.first ?? 0 })), p, {
-      transfers: (c, addr, seed) => timeout(getTransfers(c as Chain, addr, seed ? 500 : 200, false, seed ? 'case' : 'graph'), 60_000), // recipients get a full backfill; onward hops never do
-      labels: (c, addrs) => this.labels.lookup(c as Chain, addrs, orgId),
-      capped: async (c, addrs) => new Set((await this.db.indexedAddress.findMany({ where: { chain: c, address: { in: addrs }, status: 'capped' }, select: { address: true } })).map((x) => x.address)),
-      onProgress: (n) => report(n, 'tracing wallets'),
-    });
-    if (seeds.length && res.stats.failed === seeds.length && !res.stats.walletsTraced) throw new Error(`No recipient wallet could be read from the chain: ${[...res.nodes.values()].find((n) => n.error)?.error ?? 'unknown error'}`);
-
+    const deps = {
+      labels: (c: string, addrs: string[]) => this.labels.lookup(c as Chain, addrs, orgId),
+      capped: async (c: string, addrs: string[]) => new Set((await this.db.indexedAddress.findMany({ where: { chain: c, address: { in: addrs }, status: 'capped' }, select: { address: true } })).map((x) => x.address)),
+    };
+    const transfers = (c: string, addr: string, seed: boolean) => timeout(getTransfers(c as Chain, addr, seed ? 500 : 200, false, seed ? 'case' : 'graph'), 60_000); // seeds get a full backfill; further hops never do
     // Unlabelled high-activity endpoints are often exchange wallets: check them against Binance's list and relabel matches.
-    const busy = [...res.nodes.values()].filter((n) => n.stop === 'busy' && !n.labels.length);
-    if (busy.length) {
-      await report(res.stats.walletsTraced, 'checking endpoints against Binance proof-of-reserves');
+    const relabelBusy = async (r: TraceResult) => {
+      const busy = [...r.nodes.values()].filter((n) => n.stop === 'busy' && !n.labels.length);
+      if (!busy.length) return;
+      await report(r.stats.walletsTraced, 'checking endpoints against Binance proof-of-reserves');
       await porCheck(busy, 'high-activity endpoint(s)');
       for (const chain of new Set(busy.map((n) => n.chain))) {
         const found = await this.labels.lookup(chain as Chain, busy.filter((n) => n.chain === chain).map((n) => n.address), orgId);
@@ -124,6 +131,34 @@ export class CaseAnalysisController implements OnModuleInit {
           if (l.length && stop) Object.assign(n, { labels: l, stop, stopReason: `labelled ${stop} wallet (${l[0].name}): endpoint, not traced further` });
         }
       }
+    };
+    const fwdSeeds = p.direction === 'backward' ? [] : seeds;
+    await report(0, 'tracing wallets');
+    const res = await trace(fwdSeeds.map((w) => ({ chain: w.chain, address: w.address, after: w.first ?? 0 })), p, { ...deps, transfers, onProgress: (n) => report(n, 'tracing wallets') });
+    if (fwdSeeds.length && res.stats.failed === fwdSeeds.length && !res.stats.walletsTraced) throw new Error(`No recipient wallet could be read from the chain: ${[...res.nodes.values()].find((n) => n.error)?.error ?? 'unknown error'}`);
+    await relabelBusy(res);
+
+    // Backward (source of funds). Seeds: (1) the on-chain sender of every case transaction, bounded by the time it was sent;
+    // (2) every recipient wallet, bounded by its LAST payment time (what could have funded it by then). Senders first, at most MAX_SEEDS.
+    let back: TraceResult | null = null;
+    const bseedAll = new Map<string, { chain: string; address: string; after: number; tag?: string }>();
+    if (p.direction !== 'forward') {
+      for (const t of txs) {
+        if (!t.chain || !t.onFrom || !t.onAt || t.status === 'off_chain') continue; // only verified senders: the time bound must be the on-chain time
+        const k = nodeKey(t.chain, t.onFrom);
+        bseedAll.set(k, { chain: t.chain, address: t.onFrom, after: Math.max(bseedAll.get(k)?.after ?? 0, t.onAt.getTime()), tag: 'sender' });
+      }
+      for (const w of seeds) if (!bseedAll.has(nodeKey(w.chain, w.address))) bseedAll.set(nodeKey(w.chain, w.address), { chain: w.chain, address: w.address, after: w.last ?? Date.now() });
+      const all2 = [...bseedAll.values()];
+      const bseeds = [...all2.filter((x) => x.tag).slice(0, MAX_SEEDS / 2), ...all2.filter((x) => !x.tag)].slice(0, MAX_SEEDS); // senders cannot crowd out every recipient
+      if (bseedAll.size > bseeds.length) notes.push(`Source tracing started from ${bseeds.length} of ${bseedAll.size} wallets (limit ${MAX_SEEDS}).`);
+      if (bseeds.length) {
+        await porCheck(bseeds.filter((x) => x.tag === 'sender'), 'sender wallet(s)');
+        await report(0, 'tracing sources');
+        const left = Math.max(10, p.budgetSec - Math.round((Date.now() - started) / 1000)); // one budget for the whole run: sources get what the onward trace left
+        back = await trace(bseeds, { ...p, budgetSec: left }, { ...deps, transfers, onProgress: (n) => report(res.stats.walletsTraced + n, 'tracing sources') }, 'backward');
+        await relabelBusy(back);
+      } else notes.push('Source tracing skipped: the case has no verified sender or recipient wallet yet.');
     }
 
     // Per recipient wallet: balance + risk (labels, reasons). Own time budget so a slow upstream cannot stall the run.
@@ -132,12 +167,12 @@ export class CaseAnalysisController implements OnModuleInit {
     const frozenFindings: Finding[] = [];
     const within = <T,>(p: Promise<T>) => timeout(p, 25_000); // one wallet's risk + balance may not stall the run
     const score = async (w: (typeof all)[number]) => {
-      const n = res.nodes.get(nodeKey(w.chain, w.address));
+      const n = res.nodes.get(nodeKey(w.chain, w.address)) ?? back?.nodes.get(nodeKey(w.chain, w.address));
       const out: Record<string, unknown> = { ...w, traced: !!n?.expanded, stopReason: n?.stopReason ?? null, error: n?.error ?? null, balance: null, labels: n?.labels.map((l) => ({ name: l.name, category: l.category, source: l.source })) ?? [], risk: null };
-      if (!n) out.risk = { score: null, level: null, reasons: [`Not traced: outside the ${MAX_SEEDS} largest recipients`] };
+      if (!n) out.risk = { score: null, level: null, reasons: [`Not traced: outside the wallets traced (limit ${MAX_SEEDS})`] };
       else if (Date.now() >= deadline) out.risk = { score: null, level: null, reasons: ['Not scored: the time budget ran out'] };
       else {
-        const [rk, bal] = await Promise.allSettled([within(this.risk.assess(w.chain as Chain, w.address, orgId, { transfers: res.histories.get(n.key) ?? [], deep: false })), within(getBalances(w.chain as Chain, w.address))]);
+        const [rk, bal] = await Promise.allSettled([within(this.risk.assess(w.chain as Chain, w.address, orgId, { transfers: res.histories.get(n.key) ?? back?.histories.get(n.key) ?? [], deep: false })), within(getBalances(w.chain as Chain, w.address))]);
         if (rk.status === 'fulfilled') {
           const r = rk.value;
           out.risk = { score: r.score, level: r.level, reasons: r.reasons, frozen: r.frozen, frozenBy: r.frozenBy, labels: r.labels.map((l) => ({ name: l.name, category: l.category, source: l.source })) };
@@ -156,17 +191,12 @@ export class CaseAnalysisController implements OnModuleInit {
     const t = totals(rows);
     const findings = [
       ...exposureFindings(res.nodes), ...frozenFindings, ...exchangeFindings(res.nodes), ...busyFindings(res.nodes), ...consolidations(res.edges, res.nodes, p.consolidationMin),
-      ...passThroughFindings(res, p.passShare, p.passHours), ...repeatedAmounts(rows, p.repeatMin), ...nearThreshold(rows, p.thresholds, p.thresholdPct), ...unusualHours(rows, p), ...internalTransfers(rows),
+      ...(back ? sourceFindings(back.nodes) : []), ...passThroughFindings(res, p.passShare, p.passHours), ...repeatedAmounts(rows, p.repeatMin), ...nearThreshold(rows, p.thresholds, p.thresholdPct), ...unusualHours(rows, p), ...internalTransfers(rows),
     ].sort(bySeverity);
 
     const s = res.stats;
-    const hit = [
-      s.hopLimit && `hop limit (${p.hops}) reached: wallets at the last hop were not followed`,
-      s.fanoutCut > 0 && `fan-out cap (${p.fanout} per wallet) cut the counterparties of ${s.fanoutCut} wallet(s)`,
-      s.walletCap && `wallet cap (${p.maxWallets} onward wallets) reached: further wallets were dropped`,
-      s.timedOut && `time budget (${p.budgetSec} s) ran out: ${s.notFollowed} discovered wallet(s) were not traced`,
-      s.failed > 0 && `${s.failed} wallet(s) could not be read from the chain`,
-    ].filter(Boolean) as string[];
+    const hit = boundsHit(s, p);
+    const backHit = back ? boundsHit(back.stats, p) : [];
     const sorted = [...rows].filter((r) => r.at !== null).sort((x, y) => x.at! - y.at!);
     const endpoints = [...res.nodes.values()].filter((n) => n.stop).slice(0, MAX_ENDPOINTS).map((n) => {
       const l = n.labels[0];
@@ -176,9 +206,11 @@ export class CaseAnalysisController implements OnModuleInit {
       version: 1, params: p, bounds: { hops: p.hops, fanout: p.fanout, maxWallets: p.maxWallets, maxSeeds: MAX_SEEDS, budgetSec: p.budgetSec, busyTransfers: p.busyTransfers },
       totals: { ...t, onChain: { count: onchain.length, amount: onchain.reduce((x, r) => x + r.amount, 0) }, wallets: all.length },
       wallets,
-      trace: { ...s, seedsTotal: all.length, seedsTraced: seeds.filter((w) => res.nodes.get(nodeKey(w.chain, w.address))?.expanded).length, hit, partial: hit.length > 0 || all.length > seeds.length, durationMs: Date.now() - started },
+      trace: { ...s, seedsTotal: all.length, seedsTraced: seeds.filter((w) => (res.nodes.get(nodeKey(w.chain, w.address)) ?? back?.nodes.get(nodeKey(w.chain, w.address)))?.expanded).length, hit, partial: hit.length > 0 || backHit.length > 0 || all.length > seeds.length, durationMs: Date.now() - started },
+      direction: p.direction,
+      sources: back ? { stats: back.stats, hit: backHit, seeds: bseedAll.size, endpoints: sourceEndpoints(back.nodes, MAX_ENDPOINTS), paths: sourcePaths(back.nodes, 30) } : null,
       findings, findingsBySeverity: Object.fromEntries(['high', 'medium', 'low', 'info'].map((k) => [k, findings.filter((f) => f.severity === k).length])),
-      endpoints, chart: linkChart(wallets as never, res, t.offChain), notes,
+      endpoints, chart: linkChart(wallets as never, res, t.offChain, back ?? undefined), notes,
       points: rows.filter((r) => r.at !== null).map((r) => [r.at, r.amount, r.offChain ? 1 : 0]),
       timeline: sorted.slice(0, MAX_TIMELINE).map((r) => ({ at: r.at, chain: r.chain, hash: r.hash, ref: r.ref, address: r.address, amount: r.amount, coin: r.coin, status: r.status, offChain: r.offChain })), timelineTotal: sorted.length,
     };
@@ -191,7 +223,7 @@ export class CaseAnalysisController implements OnModuleInit {
     const params = parseParams(b ?? {});
     if (!(await this.db.caseTransaction.count({ where: { caseId: c.id } }))) throw new BadRequestException('Add transactions (paste hashes or import a statement) before running an analysis');
     if (await this.db.caseAnalysis.findFirst({ where: { caseId: c.id, status: { in: ACTIVE } }, select: { id: true } })) throw new ConflictException('An analysis is already running for this case');
-    const a = await this.db.caseAnalysis.create({ data: { caseId: c.id, params: params as never, total: MAX_SEEDS + params.maxWallets, createdById: ctx.userId } });
+    const a = await this.db.caseAnalysis.create({ data: { caseId: c.id, params: params as never, total: (MAX_SEEDS + params.maxWallets) * (params.direction === 'both' ? 2 : 1), createdById: ctx.userId } });
     const job = await this.jobs.enqueue(ctx.orgId, 'case-analysis', { analysisId: a.id }, a.total);
     await this.db.caseAnalysis.update({ where: { id: a.id }, data: { jobId: job.id } });
     await audit(this.db, ctx, 'case.analysis.run', `case:${c.id}`, { analysis: a.id, params });
