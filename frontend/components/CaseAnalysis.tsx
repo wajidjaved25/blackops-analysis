@@ -1,8 +1,9 @@
 'use client';
 import cytoscape, { Core, ElementDefinition } from 'cytoscape';
-import { AlertTriangle, ChevronDown, Play } from 'lucide-react';
+import { AlertTriangle, ChevronDown, FolderPlus, Play } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AiPanel } from '@/components/AiPanel';
+import { ROLES } from '@/components/AddressActions';
 import { RadialHeatmap } from '@/components/charts';
 import { AddressLink, RiskBadge, TxLink } from '@/components/Risk';
 import { Table } from '@/components/Table';
@@ -20,6 +21,7 @@ interface WalletR {
   role?: string | null; chain: string; address: string; total: number; verified: number; count: number; first: number | null; last: number | null; share: number; balance: number | null; traced: boolean; stopReason: string | null; error: string | null;
   labels: { name: string; category: string; source: string }[]; risk: { score: number | null; level: string | null; reasons: string[]; frozen?: boolean } | null;
 }
+export interface Endpoint { kind: string; chain: string; address: string; name: string | null; category: string | null; source: string | null; reason: string | null; hop: number; amount: number | null; path: string }
 export interface Result {
   params: Record<string, number | number[]>;
   bounds: { hops: number; fanout: number; maxWallets: number; maxSeeds: number; budgetSec: number; busyTransfers: number };
@@ -28,8 +30,10 @@ export interface Result {
   trace: { walletsTotal: number; walletsTraced: number; failed: number; notFollowed: number; seedsTotal: number; seedsTraced: number; hit: string[]; partial: boolean; durationMs: number };
   findings: Finding[];
   findingsBySeverity: Record<string, number>;
-  endpoints: { kind: string; chain: string; address: string; name: string | null; category: string | null; source: string | null; reason: string | null; hop: number; amount: number | null; path: string }[];
-  chart: { nodes: { id: string; label: string; kind: string; chain?: string; address?: string; category?: string; hop?: number }[]; edges: { id: string; source: string; target: string; amount: number; count: number }[] };
+  endpoints: Endpoint[];
+  direction?: 'forward' | 'backward' | 'both';
+  sources?: { hit: string[]; seeds: number; stats: { walletsTotal: number; walletsTraced: number }; endpoints: Endpoint[]; paths: { chain: string; address: string; hops: number; amount: number | null; end: string; path: string }[] } | null;
+  chart: { nodes: { id: string; label: string; kind: string; chain?: string; address?: string; category?: string; hop?: number }[]; edges: { id: string; source: string; target: string; amount: number; count: number; dir?: 'forward' | 'backward' }[] };
   notes: string[];
   points: [number, number, number][];
   timeline: { at: number; chain: string | null; hash: string | null; ref: string | null; address: string | null; amount: number; coin: string; status: string; offChain: boolean }[];
@@ -99,7 +103,8 @@ function AmountBars({ points }: { points: Result['points'] }) {
   );
 }
 
-const KIND_COLOR: Record<string, string> = { source: '#6366f1', offchain: '#f59e0b', recipient: '#3b82f6', onward: '#8b94a7', busy: '#64748b', deposit: '#14b8a6' };
+const KIND_COLOR: Record<string, string> = { source: '#6366f1', offchain: '#f59e0b', recipient: '#3b82f6', onward: '#8b94a7', busy: '#64748b', deposit: '#14b8a6', upstream: '#a78bfa', sender: '#f97316' };
+const DIR_COLOR = { forward: '#3b82f6', backward: '#d97706' }; // edge colour by direction: onward vs. source side
 /** i2-style link chart: statement -> recipients -> onward hops -> endpoints (shared Cytoscape style with the graph workspace). */
 function LinkChart({ chart }: { chart: Result['chart'] }) {
   const box = useRef<HTMLDivElement>(null);
@@ -111,7 +116,7 @@ function LinkChart({ chart }: { chart: Result['chart'] }) {
         const cat = n.category ?? (['exchange', 'service', 'bridge', 'dex'].includes(n.kind) ? n.kind : n.kind === 'risk' ? 'sanctioned' : undefined);
         return { group: 'nodes' as const, data: { id: n.id, label: n.label, kind: n.kind, address: n.address ?? '', root: n.kind === 'source', expanded: !['busy', 'onward'].includes(n.kind), color: KIND_COLOR[n.kind] ?? nodeColor(cat), icon: ICON_URI[n.kind === 'source' || n.kind === 'offchain' ? 'bank' : iconFor(cat)], size: n.kind === 'source' ? 46 : n.kind === 'recipient' ? 36 : 32 } };
       }),
-      ...chart.edges.map((e) => ({ group: 'edges' as const, data: { id: e.id, source: e.source, target: e.target, color: '#888', w: 1.5 + Math.min(5, Math.log10(1 + e.amount)), label: `${compact(e.amount)}${e.count > 1 ? ` · ${e.count}×` : ''}` } })),
+      ...chart.edges.map((e) => ({ group: 'edges' as const, data: { id: e.id, source: e.source, target: e.target, color: e.dir ? DIR_COLOR[e.dir] : '#888', w: 1.5 + Math.min(5, Math.log10(1 + e.amount)), label: `${compact(e.amount)}${e.count > 1 ? ` · ${e.count}×` : ''}` } })),
     ];
     const c = cytoscape({ container: box.current, elements: els, style: buildStyle(readTheme()), minZoom: .1, maxZoom: 3, wheelSensitivity: .3, layout: { name: 'breadthfirst', directed: true, roots: '#statement', spacingFactor: 1.15, padding: 20 } as cytoscape.LayoutOptions });
     c.on('select', 'node', (e) => setSel(`${e.target.data('label').replace(/\n/g, ' · ')}${e.target.data('address') ? ` (${e.target.data('address')})` : ''}`));
@@ -127,11 +132,57 @@ function LinkChart({ chart }: { chart: Result['chart'] }) {
     <div className="stack sm">
       <div ref={box} role="img" aria-label="Link chart: statement, recipient wallets, onward hops and endpoints" data-testid="link-chart" style={{ height: 440, border: '1px solid var(--border)', borderRadius: 8, background: 'var(--graph-bg)' }} />
       <div className="legend small">
-        {[['source', 'Statement'], ['recipient', 'Recipient'], ['onward', 'Onward wallet'], ['deposit', 'Inferred deposit'], ['busy', 'High-activity (not traced)']].map(([k, l]) => <span key={k}><i className="dot" style={{ background: KIND_COLOR[k] }} />{l}</span>)}
+        {[['source', 'Statement'], ['recipient', 'Recipient'], ['onward', 'Onward wallet'], ['deposit', 'Inferred deposit'], ['busy', 'High-activity (not traced)'], ['sender', 'Sender (source side)'], ['upstream', 'Upstream wallet']].map(([k, l]) => <span key={k}><i className="dot" style={{ background: KIND_COLOR[k] }} />{l}</span>)}
         <span><i className="dot" style={{ background: nodeColor('exchange') }} />Exchange / service / bridge</span><span><i className="dot" style={{ background: nodeColor('sanctioned') }} />Sanctioned / frozen / high-risk</span>
+        <span><i className="dot" style={{ background: DIR_COLOR.forward }} />Edge: money went onward</span><span><i className="dot" style={{ background: DIR_COLOR.backward }} />Edge: money came from (source side)</span>
       </div>
       <div className="small muted" aria-live="polite">{sel || 'Click a wallet for its address. Dashed outlines are wallets that were not followed further.'}</div>
     </div>
+  );
+}
+
+/** Adds analysis wallets to the case through the bulk endpoint; one role for the batch, rows already in the case are skipped and counted. */
+function useAdder(caseId: string | undefined, onAdded?: () => void) {
+  const toast = useToast();
+  const [role, setRole] = useState('intermediary');
+  const [busy, setBusy] = useState(false);
+  const add = async (items: Cand[]) => {
+    if (!caseId || !items.length) return;
+    setBusy(true);
+    try {
+      const r = await api<{ added: number; skipped: number }>(`/cases/${caseId}/addresses/bulk`, { body: { addresses: items.map((i) => ({ ...i, role })) } });
+      toast.success(`Added ${r.added} address${r.added === 1 ? '' : 'es'} as ${role}${r.skipped ? `; ${r.skipped} already in the case, skipped` : ''}`);
+      onAdded?.();
+    } catch (e) { toast.error((e as Error).message); } finally { setBusy(false); }
+  };
+  return { role, setRole, busy, add, enabled: !!caseId };
+}
+type Cand = { chain: string; address: string; note: string };
+type Adder = ReturnType<typeof useAdder>;
+function AdderBar({ ad, items, what }: { ad: Adder; items: Cand[]; what: string }) {
+  if (!ad.enabled || !items.length) return null;
+  return (
+    <div className="row" style={{ gap: 8, flexWrap: 'wrap', marginBottom: 8 }} data-testid={`adder-${what}`}>
+      <Select sm aria-label={`Role for ${what}`} style={{ width: 150 }} value={ad.role} onChange={(e) => ad.setRole(e.target.value)}>{ROLES.map((r) => <option key={r}>{r}</option>)}</Select>
+      <Button sm busy={ad.busy} onClick={() => ad.add(items)}><FolderPlus size={14} />Add all ({items.length}) to case</Button>
+    </div>
+  );
+}
+const AddOne = ({ ad, item }: { ad: Adder; item: Cand }) => (ad.enabled ? <Button sm variant="ghost" disabled={ad.busy} aria-label={`Add ${item.address} to case`} onClick={() => ad.add([item])}><FolderPlus size={13} />Add to case</Button> : null);
+const endpointCand = (e: Endpoint, run: number | undefined, side: string): Cand => ({ chain: e.chain, address: e.address, note: `From analysis run #${run ?? '?'} (${side}): ${KIND_LABEL[e.kind] ?? e.kind}${e.name ? ` ${e.name}` : ''} at hop ${e.hop}${e.amount ? `, ${money(e.amount)} on the last hop` : ''}. Path: ${e.path}` });
+
+function EndpointTable({ rows, ad, run, side, caption, pathHeader }: { rows: Endpoint[]; ad: Adder; run?: number; side: string; caption: string; pathHeader: string }) {
+  return (
+    <>
+      <AdderBar ad={ad} what={caption.toLowerCase()} items={rows.map((e) => endpointCand(e, run, side))} />
+      <Table caption={caption} rows={rows} rowKey={(e) => e.chain + e.address} pageSize={10} cols={[
+        { key: 'k', header: 'Type', cell: (e) => <Badge tone={e.kind === 'risk' ? 'high' : e.kind === 'exchange' ? 'medium' : 'info'}>{KIND_LABEL[e.kind] ?? e.kind}</Badge>, sort: (e) => e.kind },
+        { key: 'a', header: 'Wallet', cell: (e) => <AddressLink address={e.address} chain={e.chain} label={e.name && e.category ? { name: e.name, category: e.category } : null} /> },
+        { key: 'p', header: pathHeader, wrap: true, cell: (e) => <span className="small">{e.path}</span> },
+        { key: 'r', header: 'Why the trace ends', wrap: true, hideSm: true, cell: (e) => <span className="small muted">{e.reason}{e.source ? ` (label source: ${e.source})` : ''}</span> },
+        ...(ad.enabled ? [{ key: 'x', header: '', cell: (e: Endpoint) => <AddOne ad={ad} item={endpointCand(e, run, side)} /> }] : []),
+      ]} />
+    </>
   );
 }
 
@@ -145,8 +196,11 @@ const walletCols = (total: number) => [
   { key: 'r', header: 'Risk', wrap: true, cell: (w: WalletR) => (w.risk?.level ? <details><summary style={{ cursor: 'pointer' }}><RiskBadge level={w.risk.level} score={w.risk.score ?? undefined} /></summary><ul className="small" style={{ margin: '6px 0 0', paddingLeft: 16 }}>{w.risk.reasons.map((r, i) => <li key={i}>{r}</li>)}</ul></details> : <span className="muted small" title={w.risk?.reasons.join('; ')}>{w.error ? `unreadable: ${w.error}` : w.risk?.reasons[0] ?? '—'}</span>), sort: (w: WalletR) => w.risk?.score ?? -1 },
 ];
 
-export function Results({ r }: { r: Result }) {
+export function Results({ r, caseId, runId, onAdded }: { r: Result; caseId?: string; runId?: number; onAdded?: () => void }) {
   const t = r.trace;
+  const ad = useAdder(caseId, onAdded);
+  const dir = r.direction ?? 'forward';
+  const walletCand = (w: WalletR): Cand => ({ chain: w.chain, address: w.address, note: `From analysis run #${runId ?? '?'}: statement recipient (hop 0), ${w.count} payment${w.count === 1 ? '' : 's'}, ${money(w.total)} claimed.` });
   const sev = r.findingsBySeverity;
   return (
     <div className="stack" style={{ gap: 16 }} data-testid="analysis-results">
@@ -169,19 +223,38 @@ export function Results({ r }: { r: Result }) {
         {r.findings.length === 0 ? <EmptyState title="No findings">None of the pattern rules fired on this data. That is not proof that nothing is wrong: the trace is bounded and the rules are simple.</EmptyState> : <div className="stack" style={{ gap: 8 }}>{r.findings.map((f, i) => <FindingCard key={i} f={f} />)}</div>}
       </Card>
 
-      <Card title={`Endpoints reached (${r.endpoints.length})`}>
-        {r.endpoints.length === 0 ? <p className="muted small">The trace did not reach any labelled exchange, service, bridge or high-risk wallet within its bounds.</p> : (
-          <Table caption="Endpoints reached" rows={r.endpoints} rowKey={(e) => e.chain + e.address} pageSize={10} cols={[
-            { key: 'k', header: 'Type', cell: (e) => <Badge tone={e.kind === 'risk' ? 'high' : e.kind === 'exchange' ? 'medium' : 'info'}>{KIND_LABEL[e.kind] ?? e.kind}</Badge>, sort: (e) => e.kind },
-            { key: 'a', header: 'Wallet', cell: (e) => <AddressLink address={e.address} chain={e.chain} label={e.name && e.category ? { name: e.name, category: e.category } : null} /> },
-            { key: 'p', header: 'Path from the recipient', wrap: true, cell: (e) => <span className="small">{e.path}</span> },
-            { key: 'r', header: 'Why the trace ends', wrap: true, hideSm: true, cell: (e) => <span className="small muted">{e.reason}{e.source ? ` (label source: ${e.source})` : ''}</span> },
-          ]} />
-        )}
-      </Card>
+      {dir !== 'backward' && (
+        <Card title={`Endpoints reached (${r.endpoints.length})`}>
+          {r.endpoints.length === 0 ? <p className="muted small">The trace did not reach any labelled exchange, service, bridge or high-risk wallet within its bounds.</p> : <EndpointTable rows={r.endpoints} ad={ad} run={runId} side="onward trace" caption="Endpoints reached" pathHeader="Path from the recipient" />}
+        </Card>
+      )}
+
+      {r.sources && (
+        <Card title={`Sources of funds (${r.sources.endpoints.length} endpoints, ${r.sources.paths.length} paths)`}>
+          <div className="stack" data-testid="sources-section">
+            <p className="small muted" style={{ margin: 0 }}>Backward trace from the sender of each case transaction and from each recipient wallet: only incoming transfers that arrived before the funds left that wallet are followed, within the same bounds. Read paths left to right, from the source to the case wallet. Amounts are what the wallet sent on, not necessarily case funds only.</p>
+            {r.sources.hit.length > 0 && <Notice tone="warn">Source trace is partial ({r.sources.stats.walletsTraced} of {r.sources.stats.walletsTotal} wallets read): {r.sources.hit.join(' · ')}</Notice>}
+            {r.sources.endpoints.length === 0 ? <p className="muted small">No labelled exchange, service, bridge, DEX or high-risk wallet was reached on the source side within the bounds.</p> : <EndpointTable rows={r.sources.endpoints} ad={ad} run={runId} side="source trace" caption="Source endpoints" pathHeader="Path from the source to the case wallet" />}
+            {r.sources.paths.length > 0 && (
+              <details>
+                <summary style={{ cursor: 'pointer' }}><b>Source paths ({r.sources.paths.length})</b> <span className="small muted">where each path ends</span></summary>
+                <Table caption="Source paths" rows={r.sources.paths} rowKey={(x) => x.chain + x.address + x.path} pageSize={10} cols={[
+                  { key: 'a', header: 'Furthest wallet', cell: (x) => <AddressLink address={x.address} chain={x.chain} /> },
+                  { key: 'h', header: 'Hops', num: true, cell: (x) => x.hops, sort: (x) => x.hops },
+                  { key: 'm', header: 'Amount', num: true, cell: (x) => (x.amount ? money(x.amount) : '—'), sort: (x) => x.amount },
+                  { key: 'p', header: 'Path (source first)', wrap: true, cell: (x) => <span className="small">{x.path}</span> },
+                  { key: 'e', header: 'Ends because', wrap: true, hideSm: true, cell: (x) => <span className="small muted">{x.end}</span> },
+                  ...(ad.enabled ? [{ key: 'x', header: '', cell: (x: { chain: string; address: string; hops: number; amount: number | null; path: string }) => <AddOne ad={ad} item={{ chain: x.chain, address: x.address, note: `From analysis run #${runId ?? '?'} (source trace): ${x.hops} hop${x.hops === 1 ? '' : 's'} upstream${x.amount ? `, ${money(x.amount)}` : ''}. Path: ${x.path}` }} /> }] : []),
+                ]} />
+              </details>
+            )}
+          </div>
+        </Card>
+      )}
 
       <Card title="Counterparty wallets" flush>
-        <Table caption="Counterparty wallets" rows={r.wallets} rowKey={(w) => w.chain + w.address} pageSize={10} initialSort={{ key: 't', dir: 'desc' }} cols={walletCols(r.totals.claimed)} empty={<EmptyState title="No on-chain recipient wallets">The statement rows are all off-chain.</EmptyState>} />
+        {ad.enabled && r.wallets.length > 0 && <div style={{ padding: '8px 12px 0' }}><AdderBar ad={ad} what="wallets" items={r.wallets.map(walletCand)} /></div>}
+        <Table caption="Counterparty wallets" rows={r.wallets} rowKey={(w) => w.chain + w.address} pageSize={10} initialSort={{ key: 't', dir: 'desc' }} cols={[...walletCols(r.totals.claimed), ...(ad.enabled ? [{ key: 'x', header: '', cell: (w: WalletR) => <AddOne ad={ad} item={walletCand(w)} /> }] : [])]} empty={<EmptyState title="No on-chain recipient wallets">The statement rows are all off-chain.</EmptyState>} />
       </Card>
 
       <Card title="Case link chart">
@@ -206,13 +279,13 @@ export function Results({ r }: { r: Result }) {
   );
 }
 
-export function AnalysisTab({ id }: { id: string }) {
+export function AnalysisTab({ id, onAdded }: { id: string; onAdded?: () => void }) {
   const { can } = useAuth();
   const toast = useToast();
   const manage = can('cases.manage');
   const list = useApi<Analysis[]>(`/cases/${id}/analyses`, (d) => (d.some((a) => a.status === 'queued' || a.status === 'running') ? 2000 : false));
   const [pick, setPick] = useState<number | null>(null);
-  const [f, setF] = useState({ hops: '2', fanout: '5', maxWallets: '60', budgetSec: '180', thresholds: '10000, 15000, 50000, 100000', tz: '0' });
+  const [f, setF] = useState({ hops: '2', fanout: '5', maxWallets: '60', budgetSec: '180', thresholds: '10000, 15000, 50000, 100000', tz: '0', direction: 'both' });
   const [busy, setBusy] = useState(false);
   const runs = list.data ?? [];
   const active = runs.find((a) => a.status === 'queued' || a.status === 'running');
@@ -225,7 +298,7 @@ export function AnalysisTab({ id }: { id: string }) {
   async function run() {
     setBusy(true);
     try {
-      const body = { hops: Number(f.hops), fanout: Number(f.fanout), maxWallets: Number(f.maxWallets), budgetSec: Number(f.budgetSec), thresholds: f.thresholds, tzMin: Math.round(Number(f.tz) * 60) };
+      const body = { hops: Number(f.hops), fanout: Number(f.fanout), maxWallets: Number(f.maxWallets), budgetSec: Number(f.budgetSec), thresholds: f.thresholds, tzMin: Math.round(Number(f.tz) * 60), direction: f.direction };
       const a = await api<Analysis>(`/cases/${id}/analyses`, { body });
       setPick(a.id); list.reload(); toast.success('Analysis started');
     } catch (e) { toast.error((e as Error).message); } finally { setBusy(false); }
@@ -241,8 +314,9 @@ export function AnalysisTab({ id }: { id: string }) {
           {runs.map((a, i) => <option key={a.id} value={a.id}>Run #{a.id} · {new Date(a.createdAt).toLocaleString()} · {a.status}{i === 0 ? ' (latest)' : ''}</option>)}
         </Select>)}>
         <div className="stack">
-          <p className="small muted" style={{ margin: 0 }}>Follows the money from every recipient wallet in the case, within the bounds below, then applies pattern rules. Everything is bounded so the free chain API is not flooded: results state what was and was not traced. Exchanges, services, bridges and high-activity wallets end a trace and are shown as endpoints.</p>
+          <p className="small muted" style={{ margin: 0 }}>Follows the money onward from every recipient wallet in the case and, backwards, to where it came from (sender of each transaction and recipient wallets), within the bounds below, then applies pattern rules. Everything is bounded so the free chain API is not flooded: results state what was and was not traced. Exchanges, services, bridges and high-activity wallets end a trace and are shown as endpoints.</p>
           <div className="row" style={{ gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+            <Field label="Direction"><Select aria-label="Direction" style={{ width: 190 }} value={f.direction} onChange={(e) => setF({ ...f, direction: e.target.value })}><option value="both">Both (onward and sources)</option><option value="forward">Onward only</option><option value="backward">Sources only</option></Select></Field>
             <Field label="Hops (1 to 3)"><Select aria-label="Hops" style={{ width: 90 }} value={f.hops} onChange={(e) => setF({ ...f, hops: e.target.value })}>{[1, 2, 3].map((n) => <option key={n}>{n}</option>)}</Select></Field>
             {field('fanout', 'Wallets per wallet', 120)}
             {field('maxWallets', 'Wallet cap', 100)}
@@ -267,7 +341,7 @@ export function AnalysisTab({ id }: { id: string }) {
       {detail.data?.result && (
         <>
           <div className="small muted">Run #{detail.data.id} finished <DateTime t={detail.data.finishedAt} /> · bounds: {detail.data.result.bounds.hops} hops, {detail.data.result.bounds.fanout} per wallet, {detail.data.result.bounds.maxWallets} onward wallets, {detail.data.result.bounds.budgetSec} s, wallets with {detail.data.result.bounds.busyTransfers}+ transfers count as service-scale.</div>
-          <Results r={detail.data.result} />
+          <Results r={detail.data.result} caseId={manage ? id : undefined} runId={detail.data.id} onAdded={onAdded} />
         </>
       )}
     </div>
@@ -300,6 +374,17 @@ export function AnalysisReportSection({ a }: { a: Analysis & { result: Result } 
         <table><thead><tr><th>Type</th><th>Wallet</th><th>Name (label source)</th><th>Path</th></tr></thead><tbody>
           {r.endpoints.map((e, i) => <tr key={i}><td>{KIND_LABEL[e.kind] ?? e.kind}</td><td style={{ fontFamily: 'monospace', wordBreak: 'break-all', fontSize: 10 }}>{e.address}</td><td>{e.name ? `${e.name} (${e.source})` : e.reason}</td><td>{e.path}</td></tr>)}
         </tbody></table>
+      )}
+      {r.sources && (
+        <>
+          <h3>Sources of funds (backward trace)</h3>
+          {r.sources.hit.length > 0 && <p><b>Partial.</b> {r.sources.hit.join(' · ')}</p>}
+          {r.sources.endpoints.length === 0 ? <p className="muted">No labelled endpoint on the source side within the bounds.</p> : (
+            <table><thead><tr><th>Type</th><th>Wallet</th><th>Name (label source)</th><th>Path (source first)</th></tr></thead><tbody>
+              {r.sources.endpoints.map((e, i) => <tr key={i}><td>{KIND_LABEL[e.kind] ?? e.kind}</td><td style={{ fontFamily: 'monospace', wordBreak: 'break-all', fontSize: 10 }}>{e.address}</td><td>{e.name ? `${e.name} (${e.source})` : e.reason}</td><td>{e.path}</td></tr>)}
+            </tbody></table>
+          )}
+        </>
       )}
       <h3>Counterparty wallets</h3>
       <table><thead><tr><th>Wallet</th><th className="num">Payments</th><th className="num">Total</th><th>First / last</th><th className="num">Balance</th><th>Risk and reasons</th></tr></thead><tbody>

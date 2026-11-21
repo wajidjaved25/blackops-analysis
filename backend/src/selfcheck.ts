@@ -23,7 +23,7 @@ import ExcelJS from 'exceljs';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { busyFindings, BUSY_REASON, consolidations, DEFAULT_PARAMS, exchangeFindings, exposureFindings, internalTransfers, linkChart, nearThreshold, passThrough, pathText, pathTo, repeatedAmounts, Row, trace, unusualHours, walletTable } from './analysis-rules';
+import { backPath, busyFindings, BUSY_REASON, consolidations, DEFAULT_PARAMS, exchangeFindings, exposureFindings, internalTransfers, linkChart, nearThreshold, passThrough, pathText, pathTo, repeatedAmounts, Row, sourceEndpoints, sourceFindings, sourcePaths, trace, unusualHours, walletTable } from './analysis-rules';
 import { addressContext, AddrSummary, AiController, AiService, bound, caseContext, CaseResult, clean as cleanText, contextIds, dataBlock, extractCitations, generate, MAX_CONTEXT_CHARS, MAX_OUTPUT_TOKENS, SYSTEM_PROMPT } from './ai';
 import { assetParam, parseAddr, parseCsv, privateIp, toCsv } from './util';
 
@@ -627,6 +627,55 @@ ${PE1}`, 2).length, 2); // cap
   assert.equal(pathText(pathTo(rd.nodes, 'tron|HOT')), 'S1 → D (inferred Kraken deposit address) → HOT (Kraken)');
   assert.ok(exchangeFindings(rd.nodes)[0].statement.includes('heuristic'));
   assert.equal(DEFAULT_PARAMS.hops, 2); // documented defaults
+  assert.equal(DEFAULT_PARAMS.direction, 'forward'); // the API default keeps the old behaviour; the UI sends 'both'
+  // --- backward trace (9A): S1 was funded by FUND (h0) <- BX (Binance, h-10); FUND also got SAN (sanctioned, h-5) money; later incoming must not count ---
+  // LATE -> S1 arrives after the seed bound; AFTERF -> FUND arrives after FUND paid S1; PAST -> BX must never be read (BX is an exchange)
+  const bl: Transfer[] = [
+    xt('fund-s1', 'FUND', 'S1', 1000, 0), xt('bx-fund', 'BX', 'FUND', 1000, -10), xt('san-fund', 'SAN', 'FUND', 40, -5), xt('late', 'LATE', 'S1', 77, 10),
+    xt('afterf', 'AFTERF', 'FUND', 9, 1), xt('past', 'PAST', 'BX', 5, -20), xt('s1-out', 'S1', 'OUT', 900, 2), xt('many1', 'M1', 'FUND', 3, -3), xt('many2', 'M2', 'FUND', 2, -3),
+  ];
+  labelDb.BX = [lb('Binance', 'exchange', 'official')];
+  calls.length = 0;
+  const bdeps = mkDeps({ transfers: async (_c, a) => (calls.push(a), bl.filter((t) => t.from === a || t.to === a)) });
+  const bseed = [{ chain: 'tron', address: 'S1', after: T0 + 5 * H, tag: 'sender' }];
+  const bk = await trace(bseed, P, bdeps, 'backward');
+  assert.equal(bk.direction, 'backward');
+  assert.ok(bk.nodes.has('tron|FUND') && bk.nodes.has('tron|BX') && bk.nodes.has('tron|SAN')); // sources found
+  assert.ok(!bk.nodes.has('tron|LATE') && !bk.nodes.has('tron|AFTERF') && !bk.nodes.has('tron|OUT')); // time ordering: nothing that arrived after the funds left, and no outgoing transfers
+  assert.ok(!bk.nodes.has('tron|PAST') && !calls.includes('BX') && !calls.includes('SAN')); // stops at the exchange and the sanctioned wallet: never read, nothing beyond
+  assert.deepEqual([bk.nodes.get('tron|BX')!.stop, bk.nodes.get('tron|SAN')!.stop, bk.nodes.get('tron|BX')!.hop], ['exchange', 'risk', 2]);
+  assert.deepEqual(backPath(bk.nodes, 'tron|BX').map((x) => x.address), ['BX', 'FUND', 'S1']); // flow order: source first
+  assert.ok(bk.edges.some((e) => e.from === 'tron|BX' && e.to === 'tron|FUND') && bk.edges.some((e) => e.from === 'tron|FUND' && e.to === 'tron|S1')); // edges point the way the money flowed
+  const sf = sourceFindings(bk.nodes);
+  const sx = sf.find((f) => f.type === 'source_exchange')!;
+  assert.deepEqual([sx.severity, sx.title], ['medium', 'Funds came from Binance']);
+  assert.ok(sx.statement.includes('withdrew from Binance is the lead') && sx.statement.includes('BX (Binance) → FUND → S1') && sx.statement.includes('records request'));
+  assert.ok(sx.evidence.some((e) => e.kind === 'tx' && e.hash === 'bx-fund') && sx.evidence.some((e) => e.kind === 'wallet' && e.address === 'BX'));
+  const sr = sf.find((f) => f.type === 'source_risk_exposure')!;
+  assert.deepEqual([sr.severity, sr.statement.includes('sanctioned') && sr.statement.includes('SAN (OFAC) → FUND → S1')], ['high', true]);
+  assert.equal(sourceEndpoints(bk.nodes, 10).length, 2); // BX and SAN; the sender seed itself is not an endpoint
+  assert.ok(sourcePaths(bk.nodes, 10).some((x) => x.path.startsWith('M1') && x.end.includes('no older incoming')));
+  // a sender that is itself the exchange: "funds were sent from Binance" straight away, no fetch; a labelled RECIPIENT seed (no tag) is not a source
+  calls.length = 0;
+  const bs = await trace([{ chain: 'tron', address: 'BX', after: T0, tag: 'sender' }, { chain: 'tron', address: 'EX', after: T0 }], P, bdeps, 'backward');
+  assert.equal(calls.length, 0);
+  assert.deepEqual(sourceFindings(bs.nodes).map((f) => f.title), ['Funds came from Binance']);
+  assert.equal(sourceEndpoints(bs.nodes, 10).length, 1);
+  // bounds are reported for the backward trace too
+  const bh = await trace(bseed, { ...P, hops: 1 }, bdeps, 'backward');
+  assert.ok(bh.stats.hopLimit && bh.nodes.has('tron|FUND') && !bh.nodes.has('tron|BX')); // FUND (hop 1) is not expanded at hops=1
+  const bf = await trace(bseed, { ...P, hops: 2, fanout: 1 }, bdeps, 'backward');
+  assert.ok(bf.stats.fanoutCut >= 1 && bf.nodes.get('tron|FUND')!.omitted > 0); // FUND has 5 sources, 1 kept (the biggest, BX)
+  assert.ok(bf.nodes.has('tron|BX') && !bf.nodes.has('tron|SAN'));
+  const bw = await trace(bseed, { ...P, maxWallets: 1 }, bdeps, 'backward');
+  assert.ok(bw.stats.walletCap && bw.nodes.size === 2);
+  let bclock = 0;
+  const bt = await trace(bseed, { ...P, budgetSec: 10 }, { ...bdeps, now: () => (bclock += 6_000) }, 'backward');
+  assert.ok(bt.stats.timedOut);
+  // link chart: backward edges are tagged and carry the money direction; upstream-only nodes are added
+  const bchart = linkChart([], res, { count: 0, amount: 0 }, bk);
+  assert.ok(bchart.edges.some((e) => e.dir === 'backward' && e.source === 'tron|BX' && e.target === 'tron|FUND') && bchart.edges.some((e) => e.dir === 'forward'));
+  assert.equal(bchart.nodes.find((n) => n.id === 'tron|BX')!.kind, 'exchange');
   }
 
   // --- SSRF guard ---

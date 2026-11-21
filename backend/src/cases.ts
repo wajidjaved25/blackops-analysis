@@ -17,6 +17,7 @@ export const ROLES = ['suspect', 'victim', 'exchange', 'intermediary', 'other'] 
 const STATUSES = ['open', 'closed'] as const;
 const MAX_FILE = 20 * 1024 * 1024;
 const MAX_PNG = 8 * 1024 * 1024;
+const MAX_BULK_ADDRESSES = 500;
 const MAX_TIMELINE_ADDRESSES = 25; // each address is a live chain-API call
 const TIMELINE_CONCURRENCY = 4; // wallets read at once
 const TIMELINE_WALLET_MS = 25_000; // one slow wallet is skipped (with a warning) after this
@@ -229,6 +230,34 @@ export class CasesController {
       if ((e as Prisma.PrismaClientKnownRequestError).code === 'P2002') throw new ConflictException('This address is already in the case');
       throw e;
     }
+  }
+
+  /** Many addresses at once (analysis wallets -> case). All-or-nothing validation; addresses already in the case are skipped and reported. */
+  @Perm('cases.manage')
+  @Post('cases/:id/addresses/bulk')
+  async addAddresses(@CurrentCtx() ctx: Ctx, @Param('id') raw: string, @Body() b: any) {
+    const c = await this.cases.own(ctx, raw);
+    const list: any[] = Array.isArray(b?.addresses) ? b.addresses : [];
+    if (!list.length) throw new BadRequestException('addresses must be a non-empty array');
+    if (list.length > MAX_BULK_ADDRESSES) throw new BadRequestException(`Too many addresses (${list.length}); max ${MAX_BULK_ADDRESSES} per request`);
+    const seen = new Set<string>();
+    const rows: { chain: Chain; address: string; role: string; note: string }[] = [];
+    for (const [i, x] of list.entries()) {
+      try {
+        const { chain, addr } = parseAddr(x?.address, x?.chain ?? b.chain);
+        if (seen.has(chain + addr)) continue; // duplicates inside the request count once
+        seen.add(chain + addr);
+        rows.push({ chain, address: addr, role: oneOf(x?.role ?? b.role ?? 'other', 'role', ROLES), note: str(x?.note, 'note', { optional: true, max: 2000 }) });
+      } catch (e) {
+        throw new BadRequestException(`addresses[${i}]: ${(e as Error).message}`);
+      }
+    }
+    const have = await this.db.caseAddress.findMany({ where: { caseId: c.id, OR: rows.map((r) => ({ chain: r.chain, address: r.address })) }, select: { chain: true, address: true } });
+    const known = new Set(have.map((h) => h.chain + h.address));
+    const fresh = rows.filter((r) => !known.has(r.chain + r.address));
+    const added = fresh.length ? (await this.db.caseAddress.createMany({ data: fresh.map((r) => ({ caseId: c.id, ...r })), skipDuplicates: true })).count : 0;
+    await audit(this.db, ctx, 'case.address.bulk', `case:${c.id}`, { requested: list.length, added, skipped: known.size });
+    return { added, skipped: known.size, duplicatesInRequest: list.length - rows.length, skippedAddresses: rows.filter((r) => known.has(r.chain + r.address)).map((r) => r.address).slice(0, 50) };
   }
 
   @Perm('cases.manage')

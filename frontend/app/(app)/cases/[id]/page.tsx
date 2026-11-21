@@ -1,7 +1,7 @@
 'use client';
 import { Download, FileText, Plus, Printer, Trash2, Upload } from 'lucide-react';
 import Link from 'next/link';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { useState } from 'react';
 import { ROLES } from '@/components/AddressActions';
 import { RequirePerm } from '@/components/Guard';
@@ -33,7 +33,9 @@ export default function CaseDetail() {
   const toast = useToast();
   const router = useRouter();
   const { data: c, loading, error, status, reload } = useApi<Case>(`/cases/${id}`);
-  const [tab, setTab] = useState<Tab>('overview');
+  const sp = useSearchParams();
+  const first = sp.get('tab') as Tab | null; // ?tab=analysis opens that tab (used by "Investigate this transaction")
+  const [tab, setTab] = useState<Tab>(first && ['overview', 'addresses', 'transactions', 'analysis', 'graph', 'timeline', 'notes', 'files'].includes(first) ? first : 'overview');
   const manage = can('cases.manage');
   const [edit, setEdit] = useState<{ title: string; description: string } | null>(null);
   const [del, setDel] = useState(false);
@@ -76,7 +78,7 @@ export default function CaseDetail() {
               )}
               {tab === 'addresses' && <Addresses c={c} manage={manage} act={act} />}
               {tab === 'transactions' && <TransactionsTab id={id} />}
-              {tab === 'analysis' && <AnalysisTab id={id} />}
+              {tab === 'analysis' && <AnalysisTab id={id} onAdded={reload} />}
               {tab === 'graph' && <GraphsTab caseId={id} graphs={c.graphs} manage={manage} reload={reload} />}
               {tab === 'timeline' && <Timeline id={id} addrs={c.addresses} />}
               {tab === 'notes' && <Notes c={c} manage={manage} act={act} />}
