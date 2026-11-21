@@ -80,10 +80,10 @@ export const exchangeOfFormat = (f: Format): string | null => (f === 'binance_wi
  * "Off-chain transfer" rows: the exchange moved funds internally, which it does only between its own accounts, so the
  * destination address is one of its deposit addresses. Returns each distinct valid address once (chain from the Network column, else the address format).
  */
-export function offChainDepositAddresses(rows: NormRow[]): { chain: Chain; address: string }[] {
+export function offChainDepositAddresses(rows: NormRow[], allRows = false): { chain: Chain; address: string }[] {
   const out = new Map<string, { chain: Chain; address: string }>();
   for (const r of rows) {
-    if (!r.offChain || !r.address || r.problems.length) continue;
+    if ((!allRows && !r.offChain) || !r.address || r.problems.length) continue;
     const d = detectChain(r.address);
     const n = r.network ? networkChain(r.network) : null;
     const chain = n ?? d;
@@ -92,6 +92,19 @@ export function offChainDepositAddresses(rows: NormRow[]): { chain: Chain; addre
     out.set(chain + address, { chain, address });
   }
   return [...out.values()];
+}
+
+/**
+ * 9C: what a statement proves about its addresses. Both kinds are CUSTOMER accounts at the exchange (category exchange_deposit), never exchange-owned wallets:
+ * - deposit history: the Address column is the statement holder's OWN deposit address ('holder');
+ * - withdrawal history: an "Off-chain transfer" recipient is ANOTHER customer's deposit address ('customer').
+ * An on-chain withdrawal destination proves nothing about who owns it and gets no label.
+ */
+export function statementDepositLabels(format: Format, rows: NormRow[], caseId: number): { chain: Chain; address: string; name: string }[] {
+  const ex = exchangeOfFormat(format);
+  if (!ex) return [];
+  if (format === 'binance_deposit') return offChainDepositAddresses(rows, true).map((a) => ({ ...a, name: `${ex} deposit address of the statement holder (case #${caseId})` }));
+  return offChainDepositAddresses(rows).map((a) => ({ ...a, name: `${ex} customer deposit address (internal transfer in case #${caseId} statement)` }));
 }
 
 export interface NormRow {

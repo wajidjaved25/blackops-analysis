@@ -12,7 +12,8 @@ export const WEIGHTS: Record<string, number> = {
   mixer: 80,
   gambling: 50,
   other: 20,
-  exchange: 0,
+  exchange: 0, // exchange-OWNED wallet (hot/cold)
+  exchange_deposit: 0, // 9C: a CUSTOMER's deposit address at an exchange: informational, not the exchange itself
   service: 0,
   bridge: 0, // 7C: informational — funds may continue on another chain (bridge-hop.ts)
   dex: 0, // 7C: informational — a swap venue (swap.ts)

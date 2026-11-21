@@ -6,6 +6,7 @@ import { Chain, detectChain, ethFreezeEvents, fetchJson, hasEtherscanKey, norm, 
 import { cacheGet, cacheSet } from './kv';
 import { mapExplorerTag, parsePorList, pickTronscanTag, porName, POR_MAX_BYTES, POR_SOURCES } from './exchange-labels';
 import { BinancePor, POR_MAX_INPUT } from './binance-por';
+import { ExchangeLists } from './exchange-lists';
 import { audit, Ctx, Db } from './db';
 import { Jobs } from './jobs';
 import { CATEGORIES } from './risk-score';
@@ -281,6 +282,7 @@ export class LabelsController {
     private db: Db,
     private labels: LabelsService,
     private por: BinancePor,
+    private lists: ExchangeLists,
   ) {}
 
   /**
@@ -305,6 +307,15 @@ export class LabelsController {
     } catch (e) {
       throw new BadRequestException(`Binance check failed: ${(e as Error).message}`);
     }
+  }
+
+  /** 9C: run the stored exchange wallet-list update check now (the daily job does the same). `force` re-downloads even when the snapshot is unchanged. */
+  @Perm('labels.sync')
+  @Post('exchange-lists/sync')
+  async syncLists(@CurrentCtx() ctx: Ctx, @Body() b: any) {
+    const r = await this.lists.syncAll(b?.force === true);
+    await audit(this.db, ctx, 'label.exchange-lists.sync', 'exchange-lists', { force: b?.force === true, status: r.map((x) => `${x.exchange}:${x.status}`) });
+    return r;
   }
 
   @Perm('labels.view')
@@ -336,6 +347,7 @@ export class LabelsController {
       tronscanKey: hasTronscanKey(),
       porLastSync: await s('por.lastSync'),
       porSources: POR_SOURCES.length,
+      exchangeLists: await this.lists.status(),
       categories: CATEGORIES,
     };
   }

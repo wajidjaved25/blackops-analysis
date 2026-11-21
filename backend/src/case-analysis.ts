@@ -3,7 +3,7 @@ import { BadRequestException, Body, ConflictException, Controller, Get, NotFound
 import { CaseAnalysis } from '@prisma/client';
 import { CurrentCtx, Perm } from './auth';
 import { CasesService } from './cases';
-import { Chain, getBalances, getTransfers } from './chains';
+import { Chain, getBalances, getTransfers, norm } from './chains';
 import { BinancePor } from './binance-por';
 import { audit, Ctx, Db } from './db';
 import { Jobs } from './jobs';
@@ -14,6 +14,8 @@ import {
   pathText, pathTo, repeatedAmounts, Row, stopOf, totals, trace, unusualHours, walletTable,
 } from './analysis-rules';
 import { found, id, int } from './util';
+import { GROUP_NOTE, groupFindings, groupWallets, WalletGroup } from './wallet-groups';
+import { groupPredicates } from './wallet-groups.controller';
 
 const MAX_TIMELINE = 500;
 const MAX_ENDPOINTS = 100;
@@ -126,6 +128,21 @@ export class CaseAnalysisController implements OnModuleInit {
       }
     }
 
+    // 9C: wallets of this case that may share an owner (common funder, shared exchange customer account, round trips). Heuristics from the histories already read.
+    await report(res.stats.walletsTraced, 'looking for wallets with a common owner');
+    const ownerGroups: WalletGroup[] = [];
+    try {
+      for (const chain of new Set(seeds.map((w) => w.chain))) {
+        const histories = new Map(seeds.filter((w) => w.chain === chain).flatMap((w) => { const h = res.histories.get(nodeKey(w.chain, w.address)); return h ? [[norm(w.address), h] as const] : []; }));
+        if (histories.size < 1) continue;
+        const pred = await groupPredicates(this.labels, this.db, chain as Chain, [...histories.values()].flatMap((h) => h.flatMap((t) => [t.from, t.to])), orgId);
+        ownerGroups.push(...groupWallets({ chain, histories, ...pred }));
+      }
+    } catch (e) {
+      notes.push(`Wallet grouping skipped: ${(e as Error).message}`);
+    }
+    const roles = new Map((await this.db.caseAddress.findMany({ where: { caseId: a.caseId }, select: { chain: true, address: true, role: true } })).map((r) => [`${r.chain}|${norm(r.address)}`, r.role]));
+
     // Per recipient wallet: balance + risk (labels, reasons). Own time budget so a slow upstream cannot stall the run.
     await report(res.stats.walletsTraced, 'scoring recipients');
     const deadline = Date.now() + p.budgetSec * 1000;
@@ -133,7 +150,7 @@ export class CaseAnalysisController implements OnModuleInit {
     const within = <T,>(p: Promise<T>) => timeout(p, 25_000); // one wallet's risk + balance may not stall the run
     const score = async (w: (typeof all)[number]) => {
       const n = res.nodes.get(nodeKey(w.chain, w.address));
-      const out: Record<string, unknown> = { ...w, traced: !!n?.expanded, stopReason: n?.stopReason ?? null, error: n?.error ?? null, balance: null, labels: n?.labels.map((l) => ({ name: l.name, category: l.category, source: l.source })) ?? [], risk: null };
+      const out: Record<string, unknown> = { ...w, role: roles.get(nodeKey(w.chain, w.address)) ?? null, traced: !!n?.expanded, stopReason: n?.stopReason ?? null, error: n?.error ?? null, balance: null, labels: n?.labels.map((l) => ({ name: l.name, category: l.category, source: l.source })) ?? [], risk: null };
       if (!n) out.risk = { score: null, level: null, reasons: [`Not traced: outside the ${MAX_SEEDS} largest recipients`] };
       else if (Date.now() >= deadline) out.risk = { score: null, level: null, reasons: ['Not scored: the time budget ran out'] };
       else {
@@ -156,7 +173,7 @@ export class CaseAnalysisController implements OnModuleInit {
     const t = totals(rows);
     const findings = [
       ...exposureFindings(res.nodes), ...frozenFindings, ...exchangeFindings(res.nodes), ...busyFindings(res.nodes), ...consolidations(res.edges, res.nodes, p.consolidationMin),
-      ...passThroughFindings(res, p.passShare, p.passHours), ...repeatedAmounts(rows, p.repeatMin), ...nearThreshold(rows, p.thresholds, p.thresholdPct), ...unusualHours(rows, p), ...internalTransfers(rows),
+      ...passThroughFindings(res, p.passShare, p.passHours), ...groupFindings(ownerGroups), ...repeatedAmounts(rows, p.repeatMin), ...nearThreshold(rows, p.thresholds, p.thresholdPct), ...unusualHours(rows, p), ...internalTransfers(rows),
     ].sort(bySeverity);
 
     const s = res.stats;
@@ -178,6 +195,7 @@ export class CaseAnalysisController implements OnModuleInit {
       wallets,
       trace: { ...s, seedsTotal: all.length, seedsTraced: seeds.filter((w) => res.nodes.get(nodeKey(w.chain, w.address))?.expanded).length, hit, partial: hit.length > 0 || all.length > seeds.length, durationMs: Date.now() - started },
       findings, findingsBySeverity: Object.fromEntries(['high', 'medium', 'low', 'info'].map((k) => [k, findings.filter((f) => f.severity === k).length])),
+      ownerGroups, ownerGroupNote: GROUP_NOTE,
       endpoints, chart: linkChart(wallets as never, res, t.offChain), notes,
       points: rows.filter((r) => r.at !== null).map((r) => [r.at, r.amount, r.offChain ? 1 : 0]),
       timeline: sorted.slice(0, MAX_TIMELINE).map((r) => ({ at: r.at, chain: r.chain, hash: r.hash, ref: r.ref, address: r.address, amount: r.amount, coin: r.coin, status: r.status, offChain: r.offChain })), timelineTotal: sorted.length,

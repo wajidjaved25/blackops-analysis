@@ -9,7 +9,7 @@ import { createInterface } from 'node:readline';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import unzipper, { File as ZipFile } from 'unzipper';
-import { Chain, fetchJson, norm } from './chains';
+import { Chain, detectChain, fetchJson, norm } from './chains';
 import { Db } from './db';
 import { cacheGet, cacheSet } from './kv';
 
@@ -69,16 +69,50 @@ const keyOf = (x: PorAddr) => porKey({ chain: x.chain, address: norm(x.address) 
 export const porLabelName = (kind: PorKind, snap: Snap) => `${kind === 'hotcold' ? POR_HOT_PREFIX : POR_DEPOSIT_PREFIX} ${snapshotLabel(snap)})`;
 const isPorName = (n: string) => n.startsWith(POR_HOT_PREFIX) || n.startsWith(POR_DEPOSIT_PREFIX);
 
-async function resolveSnapshot(): Promise<{ snap: Snap; url: string }> {
+/** Cheap check: the snapshot list only (one small request), newest first. */
+export async function latestSnapshots(): Promise<Snap[]> {
   const j = await fetchJson(`${BASE}/query/auditProofSnapshotCondition`, {}, 500);
   const snaps = (Array.isArray(j?.data) ? j.data : []).map((s: unknown) => (typeof s === 'string' ? parseSnapshot(s) : null)).filter(Boolean) as Snap[];
   if (!snaps.length) throw new Error('Binance snapshot list is empty or has a new format');
-  for (const snap of snaps.slice(0, 3)) {
+  return snaps;
+}
+export async function resolveSnapshot(): Promise<{ snap: Snap; url: string }> {
+  for (const snap of (await latestSnapshots()).slice(0, 3)) {
     const r = await fetchJson(`${BASE}/por/getDownloadUrl?auditId=${auditId(snap)}`, {}, 500).catch(() => null);
     const url = typeof r?.data === 'string' ? r.data : '';
     if (/^https:\/\/[a-z0-9.-]*bnbstatic\.com\/.+\.zip$/i.test(url)) return { snap, url };
   }
   throw new Error('Binance did not return a download URL for the latest 3 snapshots');
+}
+
+/** 9C: every HotCold row on Tron/Ethereum/BNB Chain (the exchange's OWN wallets, ~233 rows). Downloads the zip to a temp file, never reads the Deposit list. */
+export async function fetchHotCold(url: string): Promise<{ rows: PorAddr[]; rejected: string[]; downloadSeconds: number; scanSeconds: number }> {
+  const dir = await mkdtemp(join(tmpdir(), 'por-'));
+  const file = join(dir, 'por.zip');
+  try {
+    let t = Date.now();
+    const res = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(20 * 60_000) });
+    if (!res.ok || !res.body) throw new Error(`Binance zip returned HTTP ${res.status}`);
+    await pipeline(Readable.fromWeb(res.body as any), createWriteStream(file));
+    const downloadSeconds = (Date.now() - t) / 1000;
+    t = Date.now();
+    const info = await unzipper.Open.file(file);
+    const hot = info.files.find((f) => f.type === 'File' && !f.path.startsWith('__MACOSX/') && !/(^|\/)\._/.test(f.path) && /_HotCold\.csv$/i.test(f.path));
+    if (!hot) throw new Error('Binance zip does not contain the expected HotCold CSV file');
+    const rows = new Map<string, PorAddr>();
+    const rejected: string[] = [];
+    const stream = hot.stream();
+    for await (const line of createInterface({ input: stream, crlfDelay: Infinity })) {
+      const p = parsePorLine(line);
+      if (!p) continue;
+      // a row whose address does not have the format of its stated network is never stored as a label for that chain
+      if (detectChain(p.address) !== (p.chain === 'tron' ? 'tron' : 'eth')) rejected.push(line.slice(0, 60));
+      else rows.set(porKey(p), p);
+    }
+    return { rows: [...rows.values()], rejected, downloadSeconds, scanSeconds: (Date.now() - t) / 1000 };
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 }
 
 /** Scans one CSV entry; matched addresses leave `want` and land in `out`. Stops reading as soon as `want` is empty. */
@@ -208,13 +242,14 @@ export class BinancePor {
       }
       matches.push({ chain, address, kind });
       const name = porLabelName(kind, snap);
+      const category = kind === 'hotcold' ? 'exchange' : 'exchange_deposit'; // 9C: a deposit-list row is a customer's address, not an exchange wallet
       const where = { chain_address_source_orgId: { chain, address, source: 'official', orgId: 0 } };
       const old = await this.db.label.findUnique({ where });
       if (old && !isPorName(old.name)) continue; // never overwrite a seeded vendor label; only refresh our own earlier PoR labels
       await this.db.label.upsert({
         where,
-        create: { chain, address, name, category: 'exchange', source: 'official', sourceUrl: url, confidence: 1, orgId: 0 },
-        update: { name, category: 'exchange', sourceUrl: url, confidence: 1 },
+        create: { chain, address, name, category, source: 'official', sourceUrl: url, confidence: 1, orgId: 0 },
+        update: { name, category, sourceUrl: url, confidence: 1 },
       });
     }
     return { snapshot: iso, url, seconds: (Date.now() - t0) / 1000, matches, timings, cachedKeys };

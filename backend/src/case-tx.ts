@@ -12,7 +12,7 @@ import { CasesService, cleanName, ext, FILE_TYPES, rm, ROLES, startsWith, UPLOAD
 import { Chain, getTx, isTxHash } from './chains';
 import { audit, Ctx, Db } from './db';
 import { Jobs } from './jobs';
-import { Cell, DEFAULT_TIME_TOL_MIN, detectFormat, exchangeOfFormat, Mapping, MAPPING_KEYS, MAX_ROWS, matchTx, NormRow, normalizeRows, offChainDepositAddresses, tzMinutes } from './statements';
+import { Cell, DEFAULT_TIME_TOL_MIN, detectFormat, Mapping, MAPPING_KEYS, MAX_ROWS, matchTx, NormRow, normalizeRows, statementDepositLabels, tzMinutes } from './statements';
 import { found, id, int, oneOf, parseCsv, toCsv } from './util';
 
 const MAX_STATEMENT = 5 * 1024 * 1024;
@@ -265,14 +265,12 @@ export class CaseTxController implements OnModuleInit {
       });
       await this.db.caseTransaction.createMany({ data: rows.map(toData), skipDuplicates: true });
 
-      // 8.19: an exchange's own "Off-chain transfer" proves the destination is one of its deposit addresses. Org-private label:
-      // a customer statement is case evidence, not a public fact. One row per (address, org): a later statement refreshes the case/file in the name.
-      const exchange = exchangeOfFormat(p.format);
-      const deposits = exchange ? offChainDepositAddresses(rows) : [];
+      // 8.19 / 9C: a statement proves its addresses are CUSTOMER accounts at the exchange (deposit address of the holder, or of another customer
+      // for an internal transfer), never the exchange's own wallets: category exchange_deposit. Org-private; a later statement refreshes the case in the name.
+      const deposits = statementDepositLabels(p.format, rows, c.id);
       for (const d of deposits) {
-        const lname = `${exchange} deposit address (per exchange statement: case #${c.id}, "${name.slice(0, 60)}")`;
         const where = { chain_address_source_orgId: { chain: d.chain, address: d.address, source: 'statement', orgId: ctx.orgId } };
-        await this.db.label.upsert({ where, create: { chain: d.chain, address: d.address, name: lname, category: 'exchange', source: 'statement', confidence: 0.9, orgId: ctx.orgId }, update: { name: lname, category: 'exchange', confidence: 0.9 } });
+        await this.db.label.upsert({ where, create: { chain: d.chain, address: d.address, name: d.name, category: 'exchange_deposit', source: 'statement', confidence: 0.9, orgId: ctx.orgId }, update: { name: d.name, category: 'exchange_deposit', confidence: 0.9 } });
       }
 
       let wallets = 0;

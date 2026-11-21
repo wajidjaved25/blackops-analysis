@@ -20,7 +20,7 @@ export function iconFor(category?: string | null): string {
     case 'scam': case 'fraud': return 'alert';
     case 'mixer': return 'shuffle';
     case 'gambling': return 'dice';
-    case 'exchange': case 'service': return 'bank';
+    case 'exchange': case 'exchange_deposit': case 'service': return 'bank';
     case 'bridge': case 'dex': return 'bridge';
     default: return 'wallet';
   }

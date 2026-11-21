@@ -5,7 +5,9 @@ import { rankHops, selfCheckHops } from './bridge-hop';
 import { detectSwaps, selfCheckSwap } from './swap';
 import { detectChain, flows, parseTronTx, FrozenMap, frozenBy, hexToTron, isTxHash, norm, parseFreezeLog, Transfer, tronToHex20 } from './chains';
 import { buildGraph, findPath } from './graph';
-import { level, scoreRisk } from './risk-score';
+import { CATEGORIES, level, scoreRisk, WEIGHTS } from './risk-score';
+import { applyHotList } from './exchange-lists';
+import { groupFindings, groupWallets } from './wallet-groups';
 import { autoAcceptDeposit, clusterConfidence, depositEvidence, exchangeName } from './cluster';
 import { isServiceScale, mapExplorerTag, parsePorList, pickTronscanTag, porName, SERVICE_SCALE_ROWS } from './exchange-labels';
 import { withVolumes } from './graph';
@@ -15,7 +17,7 @@ import { evaluateRules, ruleParams } from './monitor-rules';
 import { ALL_PERMS, hasAny, missing, PERMISSIONS, SYSTEM_ROLES } from './permissions';
 import { graphAddresses, pickSources, timelineHops } from './timeline';
 import { base32, newRecoveryCodes, openSecret, recoveryHash, sealSecret, totp, unbase32, verifyTotp } from './totp';
-import { detectFormat, exchangeOfFormat, headerTz, matchTx, networkChain, normalizeRows, offChainDepositAddresses, parseTime, tzMinutes } from './statements';
+import { detectFormat, exchangeOfFormat, headerTz, matchTx, networkChain, normalizeRows, offChainDepositAddresses, parseTime, statementDepositLabels, tzMinutes } from './statements';
 import { readGrid } from './case-tx';
 import ExcelJS from 'exceljs';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -615,6 +617,91 @@ ${PE1}`, 2).length, 2); // cap
     assert.deepEqual(dep, [{ chain: 'tron', address: W1 }, { chain: 'eth', address: '0xabcdef0123456789abcdef0123456789abcdef01' }]);
     assert.equal(exchangeOfFormat(d8.format), 'Binance');
     assert.equal(exchangeOfFormat('generic'), null);
+  }
+
+  // --- Phase 9C: exchange-owned vs customer deposit labels ---
+  {
+    assert.equal(WEIGHTS.exchange_deposit, 0);
+    assert.ok(CATEGORIES.includes('exchange_deposit'));
+    const WA = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t';
+    const EV = '0xAbCdEf0123456789aBcDeF0123456789AbCdEf01';
+    const HX = 'a'.repeat(64);
+    // withdrawal history: only the off-chain recipient is labelled, as ANOTHER customer's account; the on-chain destination gets nothing
+    const HW = ['Date(UTC+0)', 'Coin', 'Network', 'Amount', 'Fee', 'Address', 'TXID', 'Status'];
+    const w = normalizeRows([HW, ['2026-01-05 13:45:10', 'USDT', 'TRX', 100, 0, WA, 'Off-chain transfer 1', 'Completed'], ['2026-01-05 14:45:10', 'USDT', 'ETH', 50, 1, EV, `0x${HX}`, 'Completed']], detectFormat(HW).mapping, { tz: 0 });
+    assert.deepEqual(statementDepositLabels('binance_withdrawal', w, 7), [{ chain: 'tron', address: WA, name: 'Binance customer deposit address (internal transfer in case #7 statement)' }]);
+    // deposit history: the Address column is the holder's OWN deposit address, on-chain rows included
+    const HD = ['Date(UTC+0)', 'Coin', 'Network', 'Amount', 'Address', 'TXID', 'Status'];
+    const d = normalizeRows([HD, ['2026-01-05 13:45:10', 'USDT', 'TRX', 100, WA, HX, 'Completed']], detectFormat(HD).mapping, { tz: 0 });
+    assert.deepEqual(statementDepositLabels('binance_deposit', d, 7), [{ chain: 'tron', address: WA, name: 'Binance deposit address of the statement holder (case #7)' }]);
+    assert.deepEqual(statementDepositLabels('generic', d, 7), []);
+    assert.equal(exchangeName('Binance deposit address of the statement holder (case #7)'), 'Binance');
+    assert.equal(exchangeName('Binance customer deposit address (internal transfer in case #7 statement)'), 'Binance');
+    assert.equal(exchangeName('HTX hot/cold wallet (proof-of-reserves list)'), 'HTX');
+    // trace: a customer account ends the trace with the request-records reason, but a suspect seed that is one is still traced
+    const lb = (name: string, category: string, source = 'statement') => ({ name, category, source, confidence: 1 });
+    const cust = lb('Binance customer deposit address (internal transfer in case #7 statement)', 'exchange_deposit');
+    const labs: Record<string, ReturnType<typeof lb>[]> = { CUST: [cust], SEED: [cust], HOT: [lb('Binance hot/cold wallet (proof-of-reserves 12 Nov 2026)', 'exchange', 'official')] };
+    const T = Date.UTC(2026, 0, 5);
+    const tx = (hash: string, from: string, to: string, hours: number): Transfer => ({ asset: 'usdt', hash, from, to, amount: 100, timestamp: T + hours * 3600_000 });
+    const ledger9 = [tx('a', 'SEED', 'CUST', 1), tx('b', 'SEED', 'HOT', 2), tx('c', 'SEED', 'MID', 3), tx('d', 'MID', 'CUST', 4)];
+    const r9 = await trace([{ chain: 'tron', address: 'SEED', after: T }], { hops: 3, fanout: 5, maxWallets: 20, budgetSec: 30, busyTransfers: 200 }, {
+      transfers: async (_c, a) => ledger9.filter((t) => t.from === a || t.to === a),
+      labels: async (_c, addrs) => new Map(addrs.filter((a) => labs[a]).map((a) => [a, labs[a]])),
+    });
+    assert.equal(r9.nodes.get('tron|SEED')!.expanded, true);
+    assert.equal(r9.nodes.get('tron|SEED')!.stop, null);
+    assert.equal(r9.nodes.get('tron|CUST')!.stop, 'exchange_deposit');
+    assert.equal(r9.nodes.get('tron|CUST')!.stopReason, 'funds entered a Binance customer account — request account holder records from Binance');
+    assert.equal(r9.nodes.get('tron|HOT')!.stop, 'exchange');
+    const f9 = exchangeFindings(r9.nodes);
+    assert.deepEqual(f9.map((f) => f.type).sort(), ['exchange_customer_endpoint', 'exchange_endpoint']);
+    assert.ok(f9.find((f) => f.type === 'exchange_endpoint')!.title.includes('(exchange wallet)'));
+    const cf = f9.find((f) => f.type === 'exchange_customer_endpoint')!;
+    assert.ok(cf.title.includes('customer account (deposit address)') && cf.statement.includes('not a Binance wallet') && cf.statement.includes('account holder records'));
+    // stored hot/cold lists: rows replace the previous list, only this list's own labels are removed, a foreign official label is never overwritten
+    const store: { id: number; chain: string; address: string; name: string; category: string; source: string; orgId: number }[] = [
+      { id: 1, chain: 'tron', address: 'OLD', name: 'Binance hot/cold wallet (proof-of-reserves 01 Oct 2026)', category: 'exchange', source: 'official', orgId: 0 },
+      { id: 2, chain: 'tron', address: 'KEEP', name: 'Binance hot/cold wallet (proof-of-reserves 01 Oct 2026)', category: 'exchange', source: 'official', orgId: 0 },
+      { id: 3, chain: 'tron', address: 'DEP', name: 'Binance deposit address (proof-of-reserves 01 Oct 2026)', category: 'exchange_deposit', source: 'official', orgId: 0 },
+      { id: 4, chain: 'tron', address: 'VENDOR', name: 'Vendor named wallet', category: 'exchange', source: 'official', orgId: 0 },
+    ];
+    const fake = {
+      label: {
+        findMany: async ({ where }: any) => store.filter((l) => (where.NOT ? !l.name.startsWith(where.NOT.name.startsWith) && where.address.in.includes(l.address) : l.category === where.category && l.name.startsWith(where.name.startsWith))),
+        deleteMany: async ({ where }: any) => { let n = 0; for (const id of where.id.in) { const i = store.findIndex((l) => l.id === id); if (i >= 0) { store.splice(i, 1); n++; } } return { count: n }; },
+        upsert: async ({ where, create, update }: any) => { const k = where.chain_address_source_orgId; const l = store.find((x) => x.chain === k.chain && x.address === k.address); if (l) Object.assign(l, update); else store.push({ id: store.length + 10, ...create }); },
+      },
+      $transaction: async (ps: Promise<unknown>[]) => Promise.all(ps),
+    };
+    const out9 = await applyHotList(fake as never, [{ chain: 'tron', address: 'KEEP' }, { chain: 'tron', address: 'NEW' }, { chain: 'tron', address: 'VENDOR' }], { prefix: 'Binance hot/cold wallet (proof-of-reserves', name: 'Binance hot/cold wallet (proof-of-reserves 12 Nov 2026)', url: 'https://example.org/x.zip' });
+    assert.deepEqual([out9.written, out9.removed, out9.skippedForeign], [2, 1, 1]);
+    assert.ok(!store.some((l) => l.address === 'OLD') && store.some((l) => l.address === 'DEP')); // dropped wallet removed, deposit label untouched
+    assert.equal(store.find((l) => l.address === 'KEEP')!.name, 'Binance hot/cold wallet (proof-of-reserves 12 Nov 2026)');
+    assert.equal(store.find((l) => l.address === 'VENDOR')!.name, 'Vendor named wallet');
+    assert.ok(store.some((l) => l.address === 'NEW' && l.category === 'exchange'));
+
+    // wallet grouping on crafted data
+    const hh = (h: number) => T + h * 3600_000;
+    const g = (hash: string, from: string, to: string, h: number): Transfer => ({ asset: 'usdt', hash, from, to, amount: 10, timestamp: hh(h) });
+    const hist = new Map<string, Transfer[]>([
+      ['W1', [g('f1', 'F', 'W1', 0), g('p1', 'W1', 'DEP1', 5), g('rt1', 'W1', 'W2', 6)]],
+      ['W2', [g('f2', 'F', 'W2', 3), g('p2', 'W2', 'DEP1', 7), g('rt1', 'W1', 'W2', 6), g('rt2', 'W2', 'W1', 20)]],
+      ['W3', [g('f3', 'F', 'W3', 100), g('x', 'W3', 'W4', 101)]], // funded by F but 4 days later: not the same window
+      ['W5', [g('f5', 'EXH', 'W5', 0)]],
+      ['W6', [g('f6', 'EXH', 'W6', 1)]], // same funder but it is an exchange wallet: ignored
+    ]);
+    const groups = groupWallets({ chain: 'tron', histories: hist, isDeposit: (a) => a === 'DEP1', isService: (a) => a === 'EXH' || a === 'DEP1' });
+    const kinds = groups.map((x) => x.kind).sort();
+    assert.deepEqual(kinds, ['common_funder', 'round_trip', 'shared_deposit']);
+    const cfun = groups.find((x) => x.kind === 'common_funder')!;
+    assert.deepEqual([cfun.via, cfun.wallets.sort()], ['F', ['W1', 'W2']]); // W3 is outside the 24 h window, W5/W6 share an exchange funder
+    assert.deepEqual(groups.find((x) => x.kind === 'shared_deposit')!.wallets.sort(), ['W1', 'W2']);
+    assert.deepEqual(groups.find((x) => x.kind === 'round_trip')!.wallets.sort(), ['W1', 'W2']);
+    assert.ok(groups.every((x) => x.evidence.length >= 2 && /possibly|Possibly/.test(x.statement)));
+    assert.ok(!groupWallets({ chain: 'tron', histories: new Map([['A', [g('1', 'A', 'B', 0), g('2', 'B', 'A', 100)]]]), isDeposit: () => false, isService: () => false }).some((x) => x.kind === 'round_trip')); // return leg after 100 h > 72 h
+    const gf = groupFindings(groups);
+    assert.ok(gf.every((f) => f.type === 'possible_same_owner' && f.severity === 'low' && f.statement.includes('not proof')));
   }
 
   console.log('selfcheck: all passed');

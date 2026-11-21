@@ -73,7 +73,11 @@ export const csvCell = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"
 export type Level = 'severe' | 'high' | 'medium' | 'low';
 export const CATEGORY_COLOR: Record<string, string> = {
   sanctioned: '#ef4444', frozen: '#ef4444', terrorism: '#ef4444', terror: '#ef4444', ransomware: '#ef4444', darknet: '#ef4444',
-  scam: '#f43f5e', fraud: '#f43f5e', mixer: '#f97316', gambling: '#f59e0b', exchange: '#14b8a6', service: '#14b8a6', bridge: '#0ea5e9', dex: '#6366f1', other: '#8b5cf6',
+  scam: '#f43f5e', fraud: '#f43f5e', mixer: '#f97316', gambling: '#f59e0b', exchange: '#14b8a6', exchange_deposit: '#5eead4', service: '#14b8a6', bridge: '#0ea5e9', dex: '#6366f1', other: '#8b5cf6',
 };
 export const UNLABELLED = '#8b94a7';
+/** "Binance customer deposit address (...)" / "Binance hot/cold wallet (...)" -> "Binance". */
+export const exchangeOf = (name: string) => name.replace(/\s+(hot\/cold wallet|customer|deposit address|\().*$/i, '').trim() || name;
+/** 9C: a customer's deposit address at an exchange reads "<Exchange> customer account (deposit address)", never just the exchange's name. */
+export const labelText = (name: string, category?: string | null) => (category === 'exchange_deposit' ? `${exchangeOf(name)} customer account (deposit address)` : name);
 export const catColor = (c?: string | null) => (c ? CATEGORY_COLOR[c] ?? CATEGORY_COLOR.other : UNLABELLED);

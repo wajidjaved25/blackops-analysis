@@ -59,16 +59,16 @@ export class ClusterWorker implements OnModuleInit {
         const confidence = clusterConfidence(ev);
         // 8.16: strong evidence against an officially labelled exchange hot wallet is accepted straight away.
         const auto = hot.source === 'official' && autoAcceptDeposit(ev);
-        const name = auto ? `${exchangeName(hot.name)} deposit address` : `${hot.name} deposit`;
+        const name = auto ? `${exchangeName(hot.name)} deposit address` : `${exchangeName(hot.name)} deposit address (suggested)`;
         const r = await this.db.clusterSuggestion.createMany({
-          data: [{ orgId, chain: hot.chain, address: addr, name, category: 'exchange', confidence, evidence: ev as any, status: auto ? 'accepted' : 'pending' }],
+          data: [{ orgId, chain: hot.chain, address: addr, name, category: 'exchange_deposit', confidence, evidence: ev as any, status: auto ? 'accepted' : 'pending' }],
           skipDuplicates: true,
         });
         if (auto && r.count)
           await this.db.label.upsert({
             where: { chain_address_source_orgId: { chain: hot.chain, address: addr, source: 'cluster', orgId } },
-            create: { chain: hot.chain, address: addr, name, category: 'exchange', source: 'cluster', confidence, orgId },
-            update: { name, category: 'exchange', confidence },
+            create: { chain: hot.chain, address: addr, name, category: 'exchange_deposit', source: 'cluster', confidence, orgId },
+            update: { name, category: 'exchange_deposit', confidence },
           });
         created += r.count;
       } catch {

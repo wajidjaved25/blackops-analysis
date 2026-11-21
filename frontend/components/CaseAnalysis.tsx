@@ -16,7 +16,7 @@ import { useApi } from '@/lib/hooks';
 export interface Evidence { kind: 'tx' | 'wallet'; chain?: string | null; hash?: string | null; ref?: string | null; address?: string | null; amount?: number | null; at?: number | null; note?: string }
 export interface Finding { type: string; severity: 'high' | 'medium' | 'low' | 'info'; title: string; statement: string; evidence: Evidence[]; evidenceTotal: number }
 interface WalletR {
-  chain: string; address: string; total: number; verified: number; count: number; first: number | null; last: number | null; share: number; balance: number | null; traced: boolean; stopReason: string | null; error: string | null;
+  role?: string | null; chain: string; address: string; total: number; verified: number; count: number; first: number | null; last: number | null; share: number; balance: number | null; traced: boolean; stopReason: string | null; error: string | null;
   labels: { name: string; category: string; source: string }[]; risk: { score: number | null; level: string | null; reasons: string[]; frozen?: boolean } | null;
 }
 export interface Result {
@@ -37,7 +37,7 @@ export interface Result {
 export interface Analysis { id: number; status: string; stage: string; params: Record<string, number | number[]>; progress: number; total: number; error: string | null; createdAt: string; finishedAt: string | null; result?: Result | null }
 
 const SEV: Record<string, 'high' | 'medium' | 'low' | 'info'> = { high: 'high', medium: 'medium', low: 'low', info: 'info' };
-const KIND_LABEL: Record<string, string> = { exchange: 'Exchange', service: 'Service', bridge: 'Bridge', dex: 'DEX', risk: 'High-risk wallet', deposit: 'Inferred deposit address', busy: 'High-activity wallet' };
+const KIND_LABEL: Record<string, string> = { exchange: 'Exchange wallet', exchange_deposit: 'Exchange customer account', service: 'Service', bridge: 'Bridge', dex: 'DEX', risk: 'High-risk wallet', deposit: 'Inferred deposit address', busy: 'High-activity wallet' };
 const secs = (ms: number) => (ms < 90_000 ? `${Math.round(ms / 1000)} s` : `${Math.round(ms / 60_000)} min`);
 
 export function EvidenceList({ ev, total }: { ev: Evidence[]; total: number }) {
@@ -135,7 +135,7 @@ function LinkChart({ chart }: { chart: Result['chart'] }) {
 }
 
 const walletCols = (total: number) => [
-  { key: 'a', header: 'Wallet', cell: (w: WalletR) => <AddressLink address={w.address} chain={w.chain} label={w.labels[0] ?? null} />, sort: (w: WalletR) => w.address },
+  { key: 'a', header: 'Wallet', cell: (w: WalletR) => <span className="row" style={{ gap: 6 }}>{w.role && <Badge tone={w.role === 'suspect' ? 'high' : 'info'}>{w.role}</Badge>}<AddressLink address={w.address} chain={w.chain} label={w.labels[0] ?? null} /></span>, sort: (w: WalletR) => w.address },
   { key: 'n', header: 'Payments', num: true, cell: (w: WalletR) => w.count, sort: (w: WalletR) => w.count },
   { key: 't', header: 'Total', num: true, cell: (w: WalletR) => <span title={`${(w.share * 100).toFixed(1)}% of ${money(total)} claimed`}>{money(w.total)}</span>, sort: (w: WalletR) => w.total },
   { key: 's', header: 'Share', num: true, hideSm: true, cell: (w: WalletR) => `${(w.share * 100).toFixed(1)}%`, sort: (w: WalletR) => w.share },
