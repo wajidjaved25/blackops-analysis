@@ -1,5 +1,5 @@
 'use client';
-import { Download, FileSpreadsheet, ListPlus, RefreshCw, Trash2, Upload } from 'lucide-react';
+import { Download, FileSpreadsheet, ListPlus, Microscope, RefreshCw, Trash2, Upload } from 'lucide-react';
 import { useState } from 'react';
 import { ROLES } from '@/components/AddressActions';
 import { ConfirmDialog, Modal } from '@/components/Modal';
@@ -28,7 +28,9 @@ export const StatusBadge = ({ s }: { s: string }) => <Badge tone={STATUS[s]?.ton
 const amt = (n: number | null, coin?: string | null) => (n === null ? '—' : money(n, coin ?? 'usdt'));
 const PAGE = 100;
 
-export function TransactionsTab({ id }: { id: string }) {
+const MAX_SELECTED = 5000; // the API limit for an Analyse-selected scope
+
+export function TransactionsTab({ id, onAnalyse }: { id: string; onAnalyse?: (ids: number[]) => void }) {
   const { can } = useAuth();
   const toast = useToast();
   const manage = can('cases.manage');
@@ -38,11 +40,19 @@ export function TransactionsTab({ id }: { id: string }) {
   const [limit, setLimit] = useState(PAGE);
   const [modal, setModal] = useState<'paste' | 'import' | null>(null);
   const [del, setDel] = useState<Tx | null>(null);
+  const [sel, setSel] = useState<Set<string | number>>(new Set());
   const path = `/cases/${id}/transactions?limit=${limit}${status ? `&status=${status}` : ''}${dq ? `&q=${encodeURIComponent(dq)}` : ''}`;
   const { data, loading, error, status: http, reload } = useApi<TxList>(path, (d) => (d.summary.pending > 0 ? 2000 : false)); // poll while the verification job runs
   const s = data?.summary;
   const offChain = s?.byStatus.off_chain?.count ?? 0;
   const verifiable = s ? s.total - offChain : 0;
+  const ids = [...sel].map(Number);
+  const selectAll = async () => {
+    try {
+      const r = await api<{ ids: number[] }>(`/cases/${id}/transactions?idsOnly=1${status ? `&status=${status}` : ''}${dq ? `&q=${encodeURIComponent(dq)}` : ''}`);
+      setSel(new Set(r.ids));
+    } catch (e) { toast.error((e as Error).message); }
+  };
   const act = async (fn: () => Promise<unknown>, ok?: string) => { try { await fn(); if (ok) toast.success(ok); reload(); } catch (e) { toast.error((e as Error).message); } };
 
   if (loading && !data) return <div className="card"><SkeletonRows /></div>;
@@ -80,7 +90,16 @@ export function TransactionsTab({ id }: { id: string }) {
         ) : null}
       </Card>
       <Card flush>
-        <Table caption="Case transactions" rows={data?.rows ?? []} rowKey={(t) => t.id} pageSize={PAGE}
+        {manage && data && data.count > 0 && (
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap', padding: '8px 12px' }} data-testid="selection-bar">
+            <span className="small" aria-live="polite"><b>{ids.length}</b> selected</span>
+            <Button sm variant="primary" disabled={!ids.length || ids.length > MAX_SELECTED} title={ids.length > MAX_SELECTED ? `At most ${MAX_SELECTED} transactions` : ''} onClick={() => onAnalyse?.(ids)}><Microscope size={14} />Analyse selected</Button>
+            <Button sm onClick={selectAll}>Select all {data.count} matching{status || dq ? ' the filter' : ''}</Button>
+            {ids.length > 0 && <Button sm variant="ghost" onClick={() => setSel(new Set())}>Clear</Button>}
+            <span className="muted small">Tick rows, then analyse only those.</span>
+          </div>
+        )}
+        <Table caption="Case transactions" rows={data?.rows ?? []} rowKey={(t) => t.id} pageSize={PAGE} selectable={manage ? { selected: sel, onChange: setSel } : undefined}
           empty={<EmptyState title={s?.total ? 'No transactions match the filter' : 'No transactions yet'}>Paste transaction hashes, or import an exchange statement (Binance withdrawal or deposit history, .xlsx or .csv) and every on-chain row is checked against the chain.</EmptyState>}
           cols={[
             { key: 's', header: 'Status', cell: (t) => <StatusBadge s={t.status} /> },

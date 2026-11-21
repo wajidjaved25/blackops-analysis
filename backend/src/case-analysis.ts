@@ -2,6 +2,7 @@
 import { BadRequestException, Body, ConflictException, Controller, Get, NotFoundException, OnModuleInit, Param, Post } from '@nestjs/common';
 import { CaseAnalysis } from '@prisma/client';
 import { CurrentCtx, Perm } from './auth';
+import { assertNotEmpty, assertSelectedInCase, describeScope, filterScope, parseScope, Scope } from './case-scope';
 import { CasesService } from './cases';
 import { Chain, getBalances, getTransfers, norm } from './chains';
 import { BinancePor } from './binance-por';
@@ -35,12 +36,14 @@ export function parseParams(b: Record<string, unknown>): Params {
   const d = DEFAULT_PARAMS;
   const th = b.thresholds === undefined || b.thresholds === '' ? d.thresholds : (Array.isArray(b.thresholds) ? b.thresholds : String(b.thresholds).split(/[\s,;]+/)).filter((x) => x !== '').map(Number);
   if (!th.length || th.length > 10 || th.some((x) => !Number.isFinite(x) || x <= 0)) throw new BadRequestException('thresholds must be 1 to 10 positive numbers');
+  const scope = parseScope(b.scope);
   return {
     hops: int(b.hops, d.hops, ...LIMITS.hops), fanout: int(b.fanout, d.fanout, ...LIMITS.fanout), maxWallets: int(b.maxWallets, d.maxWallets, ...LIMITS.maxWallets), budgetSec: int(b.budgetSec, d.budgetSec, ...LIMITS.budgetSec),
     thresholds: th, thresholdPct: num(b.thresholdPct, d.thresholdPct, 0.01, 5), repeatMin: int(b.repeatMin, d.repeatMin, 2, 100), consolidationMin: int(b.consolidationMin, d.consolidationMin, 2, 100),
     passShare: num(b.passShare, d.passShare, 0.5, 1), passHours: num(b.passHours, d.passHours, 1, 720), nightFrom: int(b.nightFrom, d.nightFrom, 0, 23), nightTo: int(b.nightTo, d.nightTo, 0, 24),
     nightShare: num(b.nightShare, d.nightShare, 0.1, 1), nightMin: int(b.nightMin, d.nightMin, 1, 1000), tzMin: int(b.tzMin, d.tzMin, -720, 840), busyTransfers: int(b.busyTransfers, d.busyTransfers, 50, 500),
     direction: oneOf(b.direction ?? d.direction, 'direction', ['forward', 'backward', 'both'] as const),
+    ...(scope ? { scope } : {}),
   };
 }
 
@@ -53,8 +56,17 @@ const boundsHit = (s: TraceStats, p: Params) => [
   s.failed > 0 && `${s.failed} wallet(s) could not be read from the chain`,
 ].filter(Boolean) as string[];
 
+/** The scope stored in a run's params, in words (old runs have none: all transactions). */
+const scopeLine = (params: unknown) => {
+  try {
+    return describeScope(parseScope((params as Record<string, unknown>)?.scope));
+  } catch {
+    return 'Scope: unreadable';
+  }
+};
+
 const view = (a: CaseAnalysis, withResult: boolean) => ({
-  id: a.id, caseId: a.caseId, status: a.status, stage: a.stage, params: a.params, progress: a.progress, total: a.total, error: a.error, createdAt: a.createdAt, finishedAt: a.finishedAt,
+  scopeSummary: scopeLine(a.params), id: a.id, caseId: a.caseId, status: a.status, stage: a.stage, params: a.params, progress: a.progress, total: a.total, error: a.error, createdAt: a.createdAt, finishedAt: a.finishedAt,
   ...(withResult ? { result: a.result } : {}),
 });
 
@@ -87,10 +99,30 @@ export class CaseAnalysisController implements OnModuleInit {
     });
   }
 
+  /** The case's transactions and the part a scope keeps (raw statement rows are only read when the direction filter needs them). */
+  private async scoped(caseId: number, scope: Scope | null) {
+    const everything = await this.db.caseTransaction.findMany({ where: { caseId }, omit: scope?.direction ? {} : { raw: true }, orderBy: [{ claimedAt: 'asc' }, { id: 'asc' }] });
+    return { everything, txs: filterScope(everything, scope) };
+  }
+
+  /** Checks that need the database: selected ids and statement files must belong to this case, and the scope must keep something. */
+  private async checkedScope(caseId: number, scope: Scope | null) {
+    const s = await this.scoped(caseId, scope);
+    if (scope?.mode === 'selected') assertSelectedInCase(scope.transactionIds!, new Set(s.everything.map((t) => t.id)));
+    if (scope?.fileIds) {
+      const have = new Set((await this.db.caseFile.findMany({ where: { caseId, id: { in: scope.fileIds } }, select: { id: true } })).map((f) => f.id));
+      const bad = scope.fileIds.filter((x) => !have.has(x));
+      if (bad.length) throw new BadRequestException(`Statement file ${bad.join(', ')} does not belong to this case`);
+    }
+    assertNotEmpty(s.txs.length, s.everything.length);
+    return s;
+  }
+
   private async analyse(a: CaseAnalysis, orgId: number, report: (progress: number, stage: string) => Promise<unknown>) {
     const started = Date.now();
     const p = parseParams(a.params as Record<string, unknown>);
-    const txs = await this.db.caseTransaction.findMany({ where: { caseId: a.caseId }, orderBy: [{ claimedAt: 'asc' }, { id: 'asc' }] });
+    const { txs, everything } = await this.scoped(a.caseId, p.scope ?? null);
+    if (!txs.length) throw new Error(`No transactions in scope (0 of ${everything.length}): they may have been deleted since the run was queued`);
     const rows: Row[] = txs.map((t) => ({
       id: t.id, chain: t.chain, hash: t.hash, ref: t.ref, address: t.address ?? t.onTo, coin: (t.coin ?? t.onAsset ?? 'USDT').toUpperCase(), amount: t.amount ?? t.onAmount ?? 0,
       at: (t.claimedAt ?? t.onAt)?.getTime() ?? null, offChain: t.status === 'off_chain', status: t.status,
@@ -219,8 +251,10 @@ export class CaseAnalysisController implements OnModuleInit {
       const l = n.labels[0];
       return { kind: n.stop, chain: n.chain, address: n.address, name: l?.name ?? null, category: l?.category ?? null, source: l?.source ?? null, reason: n.stopReason, hop: n.hop, amount: n.via?.amount ?? null, path: pathText(pathTo(res.nodes, n.key)) };
     });
+    const dateless = p.scope && (p.scope.from || p.scope.to) ? filterScope(everything, { ...p.scope, from: undefined, to: undefined }).filter((t) => !(t.claimedAt ?? t.onAt)).length : 0;
     return {
-      version: 1, params: p, bounds: { hops: p.hops, fanout: p.fanout, maxWallets: p.maxWallets, maxSeeds: MAX_SEEDS, budgetSec: p.budgetSec, busyTransfers: p.busyTransfers },
+      version: 1, params: p,
+      scope: { applied: p.scope ?? null, summary: describeScope(p.scope ?? null), inScope: txs.length, total: everything.length, ...(dateless ? { undatedExcluded: dateless } : {}) }, bounds: { hops: p.hops, fanout: p.fanout, maxWallets: p.maxWallets, maxSeeds: MAX_SEEDS, budgetSec: p.budgetSec, busyTransfers: p.busyTransfers },
       totals: { ...t, onChain: { count: onchain.length, amount: onchain.reduce((x, r) => x + r.amount, 0) }, wallets: all.length },
       wallets,
       trace: { ...s, seedsTotal: all.length, seedsTraced: seeds.filter((w) => (res.nodes.get(nodeKey(w.chain, w.address)) ?? back?.nodes.get(nodeKey(w.chain, w.address)))?.expanded).length, hit, partial: hit.length > 0 || backHit.length > 0 || all.length > seeds.length, durationMs: Date.now() - started },
@@ -240,12 +274,40 @@ export class CaseAnalysisController implements OnModuleInit {
     const c = await this.cases.own(ctx, raw);
     const params = parseParams(b ?? {});
     if (!(await this.db.caseTransaction.count({ where: { caseId: c.id } }))) throw new BadRequestException('Add transactions (paste hashes or import a statement) before running an analysis');
+    await this.checkedScope(c.id, params.scope ?? null);
     if (await this.db.caseAnalysis.findFirst({ where: { caseId: c.id, status: { in: ACTIVE } }, select: { id: true } })) throw new ConflictException('An analysis is already running for this case');
     const a = await this.db.caseAnalysis.create({ data: { caseId: c.id, params: params as never, total: (MAX_SEEDS + params.maxWallets) * (params.direction === 'both' ? 2 : 1), createdById: ctx.userId } });
     const job = await this.jobs.enqueue(ctx.orgId, 'case-analysis', { analysisId: a.id }, a.total);
     await this.db.caseAnalysis.update({ where: { id: a.id }, data: { jobId: job.id } });
     await audit(this.db, ctx, 'case.analysis.run', `case:${c.id}`, { analysis: a.id, params });
     return view({ ...a, jobId: job.id }, false);
+  }
+
+  /** Live count for the scope picker: how many of the case's transactions a scope keeps, plus the values the filters can offer. Nothing is stored. */
+  @Perm('cases.view')
+  @Post('cases/:id/analyses/scope-preview')
+  async scopePreview(@CurrentCtx() ctx: Ctx, @Param('id') raw: string, @Body() b: Record<string, unknown>) {
+    const c = await this.cases.own(ctx, raw);
+    const scope = parseScope(b?.scope);
+    const { everything, txs } = await this.scoped(c.id, scope);
+    if (scope?.mode === 'selected') assertSelectedInCase(scope.transactionIds!, new Set(everything.map((t) => t.id)));
+    const count = <K,>(f: (t: (typeof everything)[number]) => K | null) => {
+      const m = new Map<K, number>();
+      for (const t of everything) { const k = f(t); if (k !== null) m.set(k, (m.get(k) ?? 0) + 1); }
+      return m;
+    };
+    const files = await this.db.caseFile.findMany({ where: { caseId: c.id, id: { in: [...new Set(everything.flatMap((t) => (t.fileId === null ? [] : [t.fileId])))] } }, select: { id: true, name: true } });
+    const perFile = count((t) => t.fileId);
+    const wallets = [...count((t) => t.address ?? t.onTo)].sort((x, y) => y[1] - x[1]).slice(0, 200);
+    return {
+      inScope: txs.length, total: everything.length, summary: describeScope(scope),
+      undatedExcluded: scope && (scope.from || scope.to) ? filterScope(everything, { ...scope, mode: 'all', from: undefined, to: undefined }).filter((t) => !(t.claimedAt ?? t.onAt)).length : 0,
+      facets: {
+        statuses: Object.fromEntries(count((t) => t.status)), chains: Object.fromEntries(count((t) => t.chain)), assets: Object.fromEntries(count((t) => (t.coin ?? t.onAsset ?? 'USDT').toUpperCase())),
+        files: files.map((f) => ({ id: f.id, name: f.name, count: perFile.get(f.id) ?? 0 })), pasted: everything.filter((t) => t.source === 'manual' && t.fileId === null).length,
+        wallets: wallets.map(([address, n]) => ({ address, count: n })), walletsTotal: new Set(everything.map((t) => t.address ?? t.onTo).filter(Boolean)).size,
+      },
+    };
   }
 
   @Perm('cases.view')
