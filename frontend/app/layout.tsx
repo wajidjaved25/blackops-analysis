@@ -7,7 +7,7 @@ const inter = Inter({ subsets: ['latin'], variable: '--font-inter', display: 'sw
 const mono = JetBrains_Mono({ subsets: ['latin'], variable: '--font-mono', display: 'swap' });
 
 export const metadata: Metadata = {
-  title: { default: 'USDT Trace', template: '%s · USDT Trace' },
+  title: { default: 'Tracera', template: '%s · Tracera' },
   description: 'USDT blockchain investigation, screening and monitoring for TRC20 and ERC20',
 };
 export const viewport: Viewport = { width: 'device-width', initialScale: 1 };

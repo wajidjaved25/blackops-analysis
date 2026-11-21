@@ -36,7 +36,7 @@ export function verifyTotp(secretB32: string, code: string, now = Date.now(), la
 
 export const newSecret = () => base32(randomBytes(20));
 export const otpauthUrl = (email: string, secret: string) =>
-  `otpauth://totp/${encodeURIComponent('USDT Trace')}:${encodeURIComponent(email)}?secret=${secret}&issuer=${encodeURIComponent('USDT Trace')}&algorithm=SHA1&digits=6&period=${STEP}`;
+  `otpauth://totp/${encodeURIComponent('Tracera')}:${encodeURIComponent(email)}?secret=${secret}&issuer=${encodeURIComponent('Tracera')}&algorithm=SHA1&digits=6&period=${STEP}`;
 
 export const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 

@@ -1,6 +1,6 @@
-# USDT Trace
+# Tracera
 
-Chainalysis-style investigation and screening for USDT on **Tron (TRC20)** and **Ethereum (ERC20)**.
+Chainalysis-style investigation, screening and monitoring for stablecoins (USDT, USDC) on **Tron**, **Ethereum** and **BNB Chain**.
 
 - What we're building and why: [plan.md](plan.md)
 - What to do next: [task.md](task.md)

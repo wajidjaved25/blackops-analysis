@@ -114,7 +114,7 @@ export class InvestigateController {
     const s = await this.summary(chain, addr, 2000, ctx.orgId, true, assetParam(asset));
     await audit(this.db, ctx, 'address.export', `${chain}:${addr}`);
     const rows = [
-      ['USDT Trace address report'],
+      ['Tracera address report'],
       ['address', addr],
       ['chain', chain],
       ['generated_at', new Date().toISOString()],

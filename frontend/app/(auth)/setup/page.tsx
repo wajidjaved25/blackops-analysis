@@ -20,7 +20,7 @@ export default function Setup() {
         try { await api('/auth/setup', { quiet: true, body: f }); location.href = '/'; }
         catch (x) { setErr((x as Error).message); } finally { setBusy(false); }
       }}>
-        <div className="row"><span className="logo"><ShieldCheck size={18} /></span><strong style={{ fontSize: 16 }}>USDT Trace</strong></div>
+        <div className="row"><span className="logo"><ShieldCheck size={18} /></span><strong style={{ fontSize: 16 }}>Tracera</strong></div>
         <div><h1>Set up your organisation</h1><p className="muted" style={{ marginTop: 4 }}>Create the organisation and its Owner account. You can invite teammates afterwards.</p></div>
         <Field label="Organisation name"><Input value={f.orgName} onChange={set('orgName')} required autoFocus /></Field>
         <Field label="Your name"><Input value={f.name} onChange={set('name')} autoComplete="name" required /></Field>

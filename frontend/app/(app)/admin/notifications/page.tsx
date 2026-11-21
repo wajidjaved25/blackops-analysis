@@ -24,7 +24,7 @@ export default function Notifications() {
   return (
     <RequirePerm perm="notify.manage">
       <div className="page stack" style={{ gap: 20 }}>
-        <PageHeader title="Notification targets" sub="Where new alerts are sent. Webhooks are signed with HMAC-SHA256 (header X-USDT-Trace-Signature)." crumbs={[{ label: 'Admin' }, { label: 'Notifications' }]}
+        <PageHeader title="Notification targets" sub="Where new alerts are sent. Webhooks are signed with HMAC-SHA256 (header X-Tracera-Signature)." crumbs={[{ label: 'Admin' }, { label: 'Notifications' }]}
           actions={<Button variant="primary" onClick={() => { setF({ type: 'email', target: '' }); setErr(''); setAdd(true); }}><Plus size={15} />Add target</Button>} />
         <Card flush>
           {loading ? <SkeletonRows /> : error ? <ErrorState error={error} status={status} onRetry={reload} /> : (

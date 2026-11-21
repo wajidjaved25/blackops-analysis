@@ -36,7 +36,7 @@ TRONGRID_API_KEY=<free key from trongrid.io>      # strongly recommended
 ETHERSCAN_API_KEY=<key>                           # needed for Ethereum / BNB Chain
 SMTP_HOST=localhost                               # Virtualmin's Postfix, or your SMTP relay
 SMTP_PORT=25
-SMTP_FROM=USDT Trace <alerts@analysis.publicvm.com>
+SMTP_FROM=Tracera <alerts@analysis.publicvm.com>
 ```
 Then:
 ```bash
@@ -54,7 +54,7 @@ cd ~/app && bash scripts/deploy.sh
 ```
 
 ## 6. Checks / troubleshooting
-- `pm2 status`, `pm2 logs usdt-api --lines 100`
+- `pm2 status`, `pm2 logs tracera-api --lines 100`
 - `curl -s http://127.0.0.1:4000/api/health` on the server
 - Admin → Sessions should show your real IP, not 127.0.0.1 (if it shows 127.0.0.1, `TRUST_PROXY` is wrong).
 - 502 from Apache = PM2 app down; 403 "Cross-origin" on login = `ALLOWED_ORIGINS` doesn't match the URL exactly.

@@ -137,7 +137,7 @@ Admins can create **custom roles** with any subset (cannot grant a permission th
 
 `Alert` = `{ id, chain, address, counterparty, amount, txHash, detail, status, createdAt, updatedAt, ruleId, watchItemId }`.
 First poll of a new watched address only records a baseline — alerts start from the next new transfer.
-Webhook: POST JSON `{ event: 'alert.created', alert }`, header `X-USDT-Trace-Signature: sha256=<HMAC-SHA256(secret, rawBody) hex>`.
+Webhook: POST JSON `{ event: 'alert.created', alert }`, header `X-Tracera-Signature: sha256=<HMAC-SHA256(secret, rawBody) hex>`.
 
 ## Cases (Phase 4) ✅
 

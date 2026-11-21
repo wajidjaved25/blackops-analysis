@@ -106,7 +106,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
     <div className={cx('app', collapsed && 'collapsed', drawer && 'drawer-open')}>
       {drawer && <div className="scrim only-sm" style={{ zIndex: 25 }} onClick={() => setDrawer(false)} />}
       <aside className="sidebar" aria-label="Main navigation">
-        <Link href="/" className="brand"><span className="logo"><ShieldCheck size={18} /></span><span className="lbl hide-collapsed" style={collapsed ? { display: 'none' } : undefined}>USDT Trace</span></Link>
+        <Link href="/" className="brand"><span className="logo"><ShieldCheck size={18} /></span><span className="lbl hide-collapsed" style={collapsed ? { display: 'none' } : undefined}>Tracera</span></Link>
         <nav className="nav">
           {NAV.map((g) => {
             const items = g.items.filter((i) => !i.perm || (Array.isArray(i.perm) ? i.perm : [i.perm]).some(can));

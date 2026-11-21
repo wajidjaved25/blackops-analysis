@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build and (re)start USDT Trace under PM2. Run on the server from the repo root:  bash scripts/deploy.sh
+# Build and (re)start Tracera under PM2. Run on the server from the repo root:  bash scripts/deploy.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # Optional per-server ports (gitignored): WEB_PORT=3310 / API_PORT=4310
@@ -23,6 +23,7 @@ cp -r .next/static .next/standalone/.next/
 [ -d public ] && cp -r public .next/standalone/
 cd ..
 
+pm2 delete usdt-api usdt-web >/dev/null 2>&1 || true # one-time: processes were renamed to tracera-api / tracera-web
 pm2 startOrReload ecosystem.config.js --update-env
 pm2 save
 echo "deployed: $(git log --oneline -1)"

@@ -1,4 +1,4 @@
-# USDT Chain Analysis Platform — Plan
+# Tracera — Plan
 
 A Chainalysis-style investigation and compliance platform for **USDT on Tron (TRC20) and Ethereum (ERC20)**.
 Task-level breakdown and progress live in [task.md](task.md). This file is the "what and why"; task.md is the "do this next".

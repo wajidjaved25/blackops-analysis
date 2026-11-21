@@ -36,7 +36,7 @@ export class Notifier {
     await Promise.all(targets.map((t) => (t.type === 'webhook' ? this.webhook(t.target, t.secret ?? '', payload) : this.email(t.target, a))));
   }
 
-  /** POST JSON; header X-USDT-Trace-Signature: sha256=<hex HMAC of the raw body with the target secret>. */
+  /** POST JSON; header X-Tracera-Signature: sha256=<hex HMAC of the raw body with the target secret>. */
   async webhook(url: string, secret: string, payload: object) {
     const body = JSON.stringify(payload);
     try {
@@ -44,7 +44,7 @@ export class Notifier {
       const r = await fetch(url, {
         redirect: 'manual', // a redirect could point at an internal address
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-usdt-trace-signature': 'sha256=' + createHmac('sha256', secret).update(body).digest('hex') },
+        headers: { 'content-type': 'application/json', 'x-tracera-signature': 'sha256=' + createHmac('sha256', secret).update(body).digest('hex') },
         body,
         signal: AbortSignal.timeout(10_000),
       });
@@ -60,10 +60,10 @@ export class Notifier {
     if (!this.mailer) return this.log.warn(`email to ${to} skipped: SMTP_HOST not set`);
     try {
       await this.mailer.sendMail({
-        from: process.env.SMTP_FROM ?? 'USDT Trace <alerts@localhost>',
+        from: process.env.SMTP_FROM ?? 'Tracera <alerts@localhost>',
         to,
-        subject: `[USDT Trace] Alert on ${a.address.slice(0, 10)}…: ${a.detail.slice(0, 80)}`,
-        text: `${a.detail}\n\nWallet: ${a.address} (${a.chain})\nCounterparty: ${a.counterparty ?? '—'}\nTransaction: ${a.txHash ?? '—'}\nTime: ${a.createdAt.toISOString()}\n\nOpen the alerts inbox in USDT Trace to review.`,
+        subject: `[Tracera] Alert on ${a.address.slice(0, 10)}…: ${a.detail.slice(0, 80)}`,
+        text: `${a.detail}\n\nWallet: ${a.address} (${a.chain})\nCounterparty: ${a.counterparty ?? '—'}\nTransaction: ${a.txHash ?? '—'}\nTime: ${a.createdAt.toISOString()}\n\nOpen the alerts inbox in Tracera to review.`,
       });
     } catch (e) {
       this.log.warn(`email to ${to} failed: ${(e as Error).message}`);
@@ -359,7 +359,7 @@ export class MonitorController {
   @Post('notify-targets/:id/test')
   async testTarget(@CurrentCtx() ctx: Ctx, @Param('id') raw: string) {
     const t = found(await this.db.notifyTarget.findFirst({ where: { id: id(raw), orgId: ctx.orgId } }), 'Target not found');
-    const sample = { id: 0, orgId: ctx.orgId, watchItemId: 0, ruleId: 0, dedupKey: 'test', chain: 'tron', asset: 'usdt', address: 'TEST', counterparty: null, amount: null, txHash: null, detail: 'Test notification from USDT Trace', status: 'open', createdAt: new Date(), updatedAt: new Date() } as Alert;
+    const sample = { id: 0, orgId: ctx.orgId, watchItemId: 0, ruleId: 0, dedupKey: 'test', chain: 'tron', asset: 'usdt', address: 'TEST', counterparty: null, amount: null, txHash: null, detail: 'Test notification from Tracera', status: 'open', createdAt: new Date(), updatedAt: new Date() } as Alert;
     if (t.type === 'webhook') return { ok: await this.notifier.webhook(t.target, t.secret ?? '', { event: 'test', alert: sample }) };
     await this.notifier.email(t.target, sample);
     return { ok: true };

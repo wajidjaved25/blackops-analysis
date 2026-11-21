@@ -57,7 +57,7 @@ export function TotpEnroll({ onDone, onCancel }: { onDone: () => void; onCancel?
         <div className="codes">{codes.map((c) => <span key={c}>{c}</span>)}</div>
         <div className="row">
           <Button onClick={async () => { try { await navigator.clipboard.writeText(txt); toast.success('Copied'); } catch { toast.error('Copy failed'); } }}>Copy all</Button>
-          <Button onClick={() => download('usdt-trace-recovery-codes.txt', txt, 'text/plain')}><Download size={15} />Download</Button>
+          <Button onClick={() => download('tracera-recovery-codes.txt', txt, 'text/plain')}><Download size={15} />Download</Button>
           <Button variant="primary" className="end" onClick={onDone}>I saved them</Button>
         </div>
       </div>

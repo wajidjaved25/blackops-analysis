@@ -1,5 +1,5 @@
 {
-  "name": "usdt-trace-backend",
+  "name": "tracera-backend",
   "private": true,
   "scripts": {
     "dev": "nest start --watch",

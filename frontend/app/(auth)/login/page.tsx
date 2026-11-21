@@ -37,7 +37,7 @@ function Login() {
   return (
     <div className="auth-wrap">
       <form className="card auth-card stack" onSubmit={submit}>
-        <div className="row"><span className="logo"><ShieldCheck size={18} /></span><strong style={{ fontSize: 16 }}>USDT Trace</strong></div>
+        <div className="row"><span className="logo"><ShieldCheck size={18} /></span><strong style={{ fontSize: 16 }}>Tracera</strong></div>
         <div><h1>{step === 'pw' ? 'Sign in' : 'Two-factor authentication'}</h1><p className="muted" style={{ marginTop: 4 }}>{step === 'pw' ? 'Blockchain investigation and compliance platform.' : 'Enter the 6-digit code from your authenticator app, or a recovery code.'}</p></div>
         {step === 'pw' ? (
           <>

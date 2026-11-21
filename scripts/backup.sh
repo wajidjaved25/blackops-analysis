@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Dumps the Postgres database from the compose stack and keeps the newest KEEP dumps.
 # Usage: scripts/backup.sh            (run from anywhere; cron example below)
-#   0 3 * * * /opt/usdt-trace/scripts/backup.sh >> /var/log/usdt-backup.log 2>&1
+#   0 3 * * * /opt/tracera/scripts/backup.sh >> /var/log/usdt-backup.log 2>&1
 # Restore: gunzip -c backups/usdt_trace-YYYYmmdd-HHMMSS.sql.gz | docker compose exec -T postgres psql -U usdt -d usdt_trace
 # Case file uploads live in the "uploads" volume and need their own backup (e.g. docker run --rm -v <project>_uploads:/d -v $PWD/backups:/b alpine tar czf /b/uploads.tgz -C /d .).
 set -euo pipefail

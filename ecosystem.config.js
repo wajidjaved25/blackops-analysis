@@ -6,7 +6,7 @@ const API = process.env.API_PORT || '4000';
 module.exports = {
   apps: [
     {
-      name: 'usdt-api',
+      name: 'tracera-api',
       cwd: './backend',
       script: 'dist/main.js',
       env: { NODE_ENV: 'production', HOST: '127.0.0.1', PORT: API },
@@ -14,7 +14,7 @@ module.exports = {
       kill_timeout: 10000, // let in-flight jobs finish on reload
     },
     {
-      name: 'usdt-web',
+      name: 'tracera-web',
       cwd: './frontend/.next/standalone',
       script: 'server.js',
       env: { NODE_ENV: 'production', HOSTNAME: '127.0.0.1', PORT: WEB },

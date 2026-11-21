@@ -238,7 +238,7 @@ test('notification targets: email "send test" lands in Mailpit; webhook receives
   const srv = createServer((req: IncomingMessage, res) => {
     let b = '';
     req.on('data', (c) => (b += c));
-    req.on('end', () => { got.push({ body: b, sig: req.headers['x-usdt-trace-signature'] as string }); res.end('ok'); });
+    req.on('end', () => { got.push({ body: b, sig: req.headers['x-tracera-signature'] as string }); res.end('ok'); });
   });
   await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
   const port = (srv.address() as { port: number }).port;

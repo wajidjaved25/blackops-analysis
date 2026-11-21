@@ -33,7 +33,7 @@ export default function ReportPage() {
         {r && (
           <article className="report">
             <div className="cover">
-              <div style={{ fontSize: 12, letterSpacing: '.1em', textTransform: 'uppercase', color: '#3340d0', fontWeight: 700 }}>USDT Trace · Investigation report</div>
+              <div style={{ fontSize: 12, letterSpacing: '.1em', textTransform: 'uppercase', color: '#3340d0', fontWeight: 700 }}>Tracera · Investigation report</div>
               <h1 style={{ fontSize: 28, margin: '8px 0' }}>{r.case.title}</h1>
               <div className="muted">Case #{r.case.id} · {r.case.status} · opened {exact(r.case.createdAt)}</div>
             </div>
