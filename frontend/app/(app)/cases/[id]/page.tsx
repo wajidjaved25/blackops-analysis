@@ -40,6 +40,7 @@ export default function CaseDetail() {
   const [edit, setEdit] = useState<{ title: string; description: string } | null>(null);
   const [del, setDel] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [analyseIds, setAnalyseIds] = useState<number[] | null>(null); // rows ticked on the Transactions tab, handed to the Analysis tab
 
   async function act(fn: () => Promise<unknown>, ok?: string) {
     try { await fn(); if (ok) toast.success(ok); reload(); } catch (e) { toast.error((e as Error).message); }
@@ -77,8 +78,8 @@ export default function CaseDetail() {
                 </Card>
               )}
               {tab === 'addresses' && <Addresses c={c} manage={manage} act={act} />}
-              {tab === 'transactions' && <TransactionsTab id={id} />}
-              {tab === 'analysis' && <AnalysisTab id={id} onAdded={reload} />}
+              {tab === 'transactions' && <TransactionsTab id={id} onAnalyse={(ids) => { setAnalyseIds(ids); setTab('analysis'); }} />}
+              {tab === 'analysis' && <AnalysisTab id={id} onAdded={reload} preset={analyseIds} onPresetUsed={() => setAnalyseIds(null)} />}
               {tab === 'graph' && <GraphsTab caseId={id} graphs={c.graphs} manage={manage} reload={reload} />}
               {tab === 'timeline' && <Timeline id={id} addrs={c.addresses} />}
               {tab === 'notes' && <Notes c={c} manage={manage} act={act} />}

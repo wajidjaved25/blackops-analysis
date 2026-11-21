@@ -3,6 +3,7 @@ import cytoscape, { Core, ElementDefinition } from 'cytoscape';
 import { AlertTriangle, ChevronDown, FolderPlus, Play } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AiPanel } from '@/components/AiPanel';
+import { buildScope, EMPTY_SCOPE, ResultScope, ScopeForm, ScopeSection, useScopePreview } from '@/components/AnalysisScope';
 import { ROLES } from '@/components/AddressActions';
 import { RadialHeatmap } from '@/components/charts';
 import { AddressLink, RiskBadge, TxLink } from '@/components/Risk';
@@ -38,8 +39,9 @@ export interface Result {
   points: [number, number, number][];
   timeline: { at: number; chain: string | null; hash: string | null; ref: string | null; address: string | null; amount: number; coin: string; status: string; offChain: boolean }[];
   timelineTotal: number;
+  scope?: ResultScope; // absent on runs made before 10B (all transactions)
 }
-export interface Analysis { id: number; status: string; stage: string; params: Record<string, number | number[]>; progress: number; total: number; error: string | null; createdAt: string; finishedAt: string | null; result?: Result | null }
+export interface Analysis { scopeSummary?: string; id: number; status: string; stage: string; params: Record<string, number | number[]>; progress: number; total: number; error: string | null; createdAt: string; finishedAt: string | null; result?: Result | null }
 
 const SEV: Record<string, 'high' | 'medium' | 'low' | 'info'> = { high: 'high', medium: 'medium', low: 'low', info: 'info' };
 const KIND_LABEL: Record<string, string> = { exchange: 'Exchange wallet', exchange_deposit: 'Exchange customer account', service: 'Service', bridge: 'Bridge', dex: 'DEX', risk: 'High-risk wallet', deposit: 'Inferred deposit address', busy: 'High-activity wallet' };
@@ -204,6 +206,7 @@ export function Results({ r, caseId, runId, onAdded }: { r: Result; caseId?: str
   const sev = r.findingsBySeverity;
   return (
     <div className="stack" style={{ gap: 16 }} data-testid="analysis-results">
+      <Notice tone="info"><span data-testid="result-scope"><b>{r.scope ? r.scope.summary : 'Scope: all transactions'}</b>{r.scope ? <> · {r.scope.inScope} of {r.scope.total} transactions in scope</> : null}.{r.scope?.applied ? ' Totals, wallets, traces and pattern findings below cover only these transactions.' : ''}{r.scope?.undatedExcluded ? ` ${r.scope.undatedExcluded} undated transaction(s) were left out by the date range.` : ''}</span></Notice>
       {(t.partial || r.notes.length > 0) && (
         <Notice tone="warn">
           <b>Partial result: traced {t.walletsTraced} of {t.walletsTotal} wallets</b> ({t.seedsTraced} of {t.seedsTotal} recipient wallets), in {secs(t.durationMs)}. {[...t.hit, ...r.notes].join(' · ')}
@@ -279,7 +282,7 @@ export function Results({ r, caseId, runId, onAdded }: { r: Result; caseId?: str
   );
 }
 
-export function AnalysisTab({ id, onAdded }: { id: string; onAdded?: () => void }) {
+export function AnalysisTab({ id, onAdded, preset, onPresetUsed }: { id: string; onAdded?: () => void; preset?: number[] | null; onPresetUsed?: () => void }) {
   const { can } = useAuth();
   const toast = useToast();
   const manage = can('cases.manage');
@@ -287,6 +290,10 @@ export function AnalysisTab({ id, onAdded }: { id: string; onAdded?: () => void 
   const [pick, setPick] = useState<number | null>(null);
   const [f, setF] = useState({ hops: '2', fanout: '5', maxWallets: '60', budgetSec: '180', thresholds: '10000, 15000, 50000, 100000', tz: '0', direction: 'both' });
   const [busy, setBusy] = useState(false);
+  const [scope, setScope] = useState<ScopeForm>(preset?.length ? { ...EMPTY_SCOPE, choose: true, selectedIds: preset } : EMPTY_SCOPE);
+  useEffect(() => { if (preset?.length) { setScope({ ...EMPTY_SCOPE, choose: true, selectedIds: preset }); onPresetUsed?.(); } }, [preset]); // eslint-disable-line react-hooks/exhaustive-deps
+  const scopeBody = buildScope(scope);
+  const preview = useScopePreview(id, scopeBody);
   const runs = list.data ?? [];
   const active = runs.find((a) => a.status === 'queued' || a.status === 'running');
   const shown = runs.find((a) => a.id === pick) ?? runs[0];
@@ -298,7 +305,7 @@ export function AnalysisTab({ id, onAdded }: { id: string; onAdded?: () => void 
   async function run() {
     setBusy(true);
     try {
-      const body = { hops: Number(f.hops), fanout: Number(f.fanout), maxWallets: Number(f.maxWallets), budgetSec: Number(f.budgetSec), thresholds: f.thresholds, tzMin: Math.round(Number(f.tz) * 60), direction: f.direction };
+      const body = { hops: Number(f.hops), fanout: Number(f.fanout), maxWallets: Number(f.maxWallets), budgetSec: Number(f.budgetSec), thresholds: f.thresholds, tzMin: Math.round(Number(f.tz) * 60), direction: f.direction, ...(scopeBody ? { scope: scopeBody } : {}) };
       const a = await api<Analysis>(`/cases/${id}/analyses`, { body });
       setPick(a.id); list.reload(); toast.success('Analysis started');
     } catch (e) { toast.error((e as Error).message); } finally { setBusy(false); }
@@ -310,11 +317,12 @@ export function AnalysisTab({ id, onAdded }: { id: string; onAdded?: () => void 
   return (
     <div className="stack" style={{ gap: 16 }}>
       <Card title="Analysis" actions={runs.length > 1 && (
-        <Select sm aria-label="Analysis run" style={{ width: 230 }} value={shown?.id ?? ''} onChange={(e) => setPick(Number(e.target.value))}>
-          {runs.map((a, i) => <option key={a.id} value={a.id}>Run #{a.id} · {new Date(a.createdAt).toLocaleString()} · {a.status}{i === 0 ? ' (latest)' : ''}</option>)}
+        <Select sm aria-label="Analysis run" style={{ width: 'min(100%, 560px)' }} value={shown?.id ?? ''} onChange={(e) => setPick(Number(e.target.value))}>
+          {runs.map((a, i) => <option key={a.id} value={a.id}>Run #{a.id} · {new Date(a.createdAt).toLocaleString()} · {a.status}{i === 0 ? ' (latest)' : ''} · {a.scopeSummary ?? 'Scope: all transactions'}</option>)}
         </Select>)}>
         <div className="stack">
           <p className="small muted" style={{ margin: 0 }}>Follows the money onward from every recipient wallet in the case and, backwards, to where it came from (sender of each transaction and recipient wallets), within the bounds below, then applies pattern rules. Everything is bounded so the free chain API is not flooded: results state what was and was not traced. Exchanges, services, bridges and high-activity wallets end a trace and are shown as endpoints.</p>
+          <ScopeSection caseId={id} f={scope} setF={setScope} preview={preview} disabled={!manage} />
           <div className="row" style={{ gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
             <Field label="Direction"><Select aria-label="Direction" style={{ width: 190 }} value={f.direction} onChange={(e) => setF({ ...f, direction: e.target.value })}><option value="both">Both (onward and sources)</option><option value="forward">Onward only</option><option value="backward">Sources only</option></Select></Field>
             <Field label="Hops (1 to 3)"><Select aria-label="Hops" style={{ width: 90 }} value={f.hops} onChange={(e) => setF({ ...f, hops: e.target.value })}>{[1, 2, 3].map((n) => <option key={n}>{n}</option>)}</Select></Field>
@@ -323,7 +331,7 @@ export function AnalysisTab({ id, onAdded }: { id: string; onAdded?: () => void 
             {field('budgetSec', 'Time budget (s)', 120)}
             {field('thresholds', 'Round thresholds', 250)}
             {field('tz', 'UTC offset (h)', 100)}
-            <Button variant="primary" disabled={!manage || !!active || busy} busy={busy} title={manage ? '' : 'Requires cases.manage'} onClick={run}><Play size={14} />{active ? 'Running…' : 'Run analysis'}</Button>
+            <Button variant="primary" disabled={!manage || !!active || busy || (scope.choose && preview.data?.inScope === 0)} busy={busy} title={manage ? '' : 'Requires cases.manage'} onClick={run}><Play size={14} />{active ? 'Running…' : 'Run analysis'}</Button>
           </div>
           {active && (
             <div role="status" aria-label="Analysis progress">
@@ -340,7 +348,7 @@ export function AnalysisTab({ id, onAdded }: { id: string; onAdded?: () => void 
       {detail.error && <div className="card"><ErrorState error={detail.error} status={detail.status} onRetry={detail.reload} /></div>}
       {detail.data?.result && (
         <>
-          <div className="small muted">Run #{detail.data.id} finished <DateTime t={detail.data.finishedAt} /> · bounds: {detail.data.result.bounds.hops} hops, {detail.data.result.bounds.fanout} per wallet, {detail.data.result.bounds.maxWallets} onward wallets, {detail.data.result.bounds.budgetSec} s, wallets with {detail.data.result.bounds.busyTransfers}+ transfers count as service-scale.</div>
+          <div className="small muted">Run #{detail.data.id} finished <DateTime t={detail.data.finishedAt} /> · {detail.data.scopeSummary} · bounds: {detail.data.result.bounds.hops} hops, {detail.data.result.bounds.fanout} per wallet, {detail.data.result.bounds.maxWallets} onward wallets, {detail.data.result.bounds.budgetSec} s, wallets with {detail.data.result.bounds.busyTransfers}+ transfers count as service-scale.</div>
           <Results r={detail.data.result} caseId={manage ? id : undefined} runId={detail.data.id} onAdded={onAdded} />
         </>
       )}
@@ -357,6 +365,7 @@ export function AnalysisReportSection({ a }: { a: Analysis & { result: Result } 
       <table><tbody>
         <tr><th>Claimed by statement</th><td>{num(r.totals.claimed)}</td><th>Verified on-chain</th><td>{num(r.totals.verified)}</td><th>Off-chain</th><td>{num(r.totals.offChain.amount)} ({r.totals.offChain.count} rows)</td></tr>
         <tr><th>Wallets traced</th><td>{r.trace.walletsTraced} of {r.trace.walletsTotal}</td><th>Findings</th><td colSpan={3}>{(['high', 'medium', 'low', 'info'] as const).map((k) => `${r.findingsBySeverity[k] ?? 0} ${k}`).join(' · ')}</td></tr>
+        <tr><th>Scope</th><td colSpan={5}>{r.scope ? `${r.scope.summary} · ${r.scope.inScope} of ${r.scope.total} transactions in scope${r.scope.undatedExcluded ? ` · ${r.scope.undatedExcluded} undated transaction(s) left out by the date range` : ''}` : 'Scope: all transactions'}</td></tr>
         <tr><th>Bounds</th><td colSpan={5}>{r.bounds.hops} hops · {r.bounds.fanout} wallets per wallet · {r.bounds.maxWallets} onward wallets · {r.bounds.budgetSec} s · high-activity wallets ({r.bounds.busyTransfers}+ transfers) are endpoints</td></tr>
       </tbody></table>
       {(r.trace.partial || r.notes.length > 0) && <p><b>Partial result.</b> {[...r.trace.hit, ...r.notes].join(' · ')}</p>}

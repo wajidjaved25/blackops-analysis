@@ -8,6 +8,7 @@ import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { diskStorage } from 'multer';
 import { CurrentCtx, Perm } from './auth';
+import { MAX_SELECTED } from './case-scope';
 import { CasesService, cleanName, ext, FILE_TYPES, rm, ROLES, startsWith, UPLOAD_DIR } from './cases';
 import { Chain, getTx, isTxHash } from './chains';
 import { audit, Ctx, Db } from './db';
@@ -172,12 +173,13 @@ export class CaseTxController implements OnModuleInit {
 
   @Perm('cases.view')
   @Get('cases/:id/transactions')
-  async list(@CurrentCtx() ctx: Ctx, @Param('id') raw: string, @Query('status') status?: string, @Query('q') q?: string, @Query('limit') limit?: string, @Query('offset') offset?: string) {
+  async list(@CurrentCtx() ctx: Ctx, @Param('id') raw: string, @Query('status') status?: string, @Query('q') q?: string, @Query('limit') limit?: string, @Query('offset') offset?: string, @Query('idsOnly') idsOnly?: string) {
     const c = await this.cases.own(ctx, raw);
     const where: Prisma.CaseTransactionWhereInput = { caseId: c.id };
     if (status) where.status = oneOf(status, 'status', STATUSES);
     const term = (q ?? '').trim().slice(0, 100);
     if (term) where.OR = [{ hash: { contains: term, mode: 'insensitive' } }, { address: { contains: term, mode: 'insensitive' } }, { ref: { contains: term, mode: 'insensitive' } }];
+    if (idsOnly) return { ids: (await this.db.caseTransaction.findMany({ where, select: { id: true }, orderBy: { id: 'asc' }, take: MAX_SELECTED })).map((r) => r.id) }; // "select all matching the filter" for Analyse selected
     const [rows, count, summary] = await Promise.all([
       this.db.caseTransaction.findMany({ where, orderBy: [{ claimedAt: 'asc' }, { id: 'asc' }], take: int(limit, 200, 1, 1000), skip: int(offset, 0, 0, 1_000_000) }),
       this.db.caseTransaction.count({ where }),

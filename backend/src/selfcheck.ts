@@ -19,6 +19,8 @@ import { boundedMap, graphAddresses, graphStats, pickSources, timelineHops } fro
 import { base32, newRecoveryCodes, openSecret, recoveryHash, sealSecret, totp, unbase32, verifyTotp } from './totp';
 import { detectFormat, exchangeOfFormat, headerTz, matchTx, networkChain, normalizeRows, offChainDepositAddresses, parseTime, statementDepositLabels, tzMinutes } from './statements';
 import { readGrid } from './case-tx';
+import { assertNotEmpty, assertSelectedInCase, describeScope, filterScope, parseScope, rowDirection, ScopeTx } from './case-scope';
+import { parseParams } from './case-analysis';
 import ExcelJS from 'exceljs';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -870,6 +872,68 @@ ${PE1}`, 2).length, 2); // cap
     assert.ok(!groupWallets({ chain: 'tron', histories: new Map([['A', [g('1', 'A', 'B', 0), g('2', 'B', 'A', 100)]]]), isDeposit: () => false, isService: () => false }).some((x) => x.kind === 'round_trip')); // return leg after 100 h > 72 h
     const gf = groupFindings(groups);
     assert.ok(gf.every((f) => f.type === 'possible_same_owner' && f.severity === 'low' && f.statement.includes('not proof')));
+  }
+
+  // --- 10B: scope of a case analysis ---
+  {
+    const D = (iso: string) => new Date(iso);
+    const wd = { 'Date(UTC+8)': 'x', Coin: 'USDT', Network: 'TRX', Amount: 1, Fee: 1, Address: 'a', TXID: 'h', Status: 'ok' }; // Binance withdrawal headers
+    const dp = { 'Date(UTC+8)': 'x', Coin: 'USDT', Network: 'TRX', Amount: 1, Address: 'a', TXID: 'h', Status: 'ok' }; // deposit: no fee column
+    const tx = (o: Partial<ScopeTx> & { id: number }): ScopeTx => ({ chain: 'tron', status: 'verified', coin: 'USDT', onAsset: null, amount: 100, onAmount: null, claimedAt: D('2026-03-10T12:00:00Z'), onAt: null, address: 'TA', onTo: null, fileId: null, source: 'manual', ...o });
+    const T = [
+      tx({ id: 1 }),
+      tx({ id: 2, status: 'mismatch', amount: 5000, claimedAt: D('2026-05-01T00:00:00Z'), address: 'TB', fileId: 7, source: 'import', raw: wd }),
+      tx({ id: 3, status: 'off_chain', chain: null, coin: 'BTC', amount: 20, claimedAt: null, onAt: D('2026-04-01T00:00:00Z'), address: null, fileId: 7, source: 'import', raw: wd }),
+      tx({ id: 4, chain: 'eth', coin: null, onAsset: 'usdc', amount: null, onAmount: 250, claimedAt: null, onAt: null, address: null, onTo: '0xAbC', fileId: 8, source: 'import', raw: dp }),
+      tx({ id: 5, chain: 'bsc', status: 'pending', amount: 100, address: 'TA', fileId: 8, source: 'import' }),
+    ];
+    const ids = (s: unknown) => filterScope(T, parseScope(s)).map((t) => t.id);
+    assert.equal(parseScope(undefined), null);
+    assert.equal(parseScope({}), null); // no filter = everything
+    assert.equal(parseScope({ mode: 'all', statuses: [] }), null);
+    assert.deepEqual(ids(null), [1, 2, 3, 4, 5]);
+    assert.deepEqual(ids({ statuses: ['verified', 'pending'] }), [1, 4, 5]);
+    assert.deepEqual(ids({ chains: ['tron'] }), [1, 2]); // a row with an unknown chain never matches a chain filter
+    assert.deepEqual(ids({ assets: ['usdc', 'btc'] }), [3, 4]); // coin falls back to the on-chain asset, case-insensitive
+    assert.deepEqual(ids({ pasted: true }), [1]);
+    assert.deepEqual(ids({ fileIds: [7] }), [2, 3]);
+    assert.deepEqual(ids({ fileIds: [8], pasted: true }), [1, 4, 5]); // sources combine as OR
+    assert.deepEqual(ids({ wallets: ['TA'] }), [1, 5]);
+    assert.deepEqual(ids({ wallets: ['0xabc'] }), [4]); // EVM addresses compare lower-case
+    assert.deepEqual(ids({ minAmount: 100 }), [1, 2, 4, 5]); // amount falls back to the on-chain amount (250)
+    assert.deepEqual(ids({ minAmount: 50, maxAmount: 250 }), [1, 4, 5]);
+    assert.deepEqual(ids({ from: '2026-04-15T00:00:00Z' }), [2]); // rows without any time never match a date filter
+    assert.deepEqual(ids({ from: '2026-03-01T00:00:00Z', to: '2026-04-30T00:00:00Z' }), [1, 3, 5]); // time = statement time, else on-chain time
+    assert.deepEqual(ids({ direction: 'withdrawal' }), [2, 3]);
+    assert.deepEqual(ids({ direction: 'deposit' }), [4]); // pasted rows and rows without a recognised statement have no direction
+    assert.deepEqual(ids({ statuses: ['verified', 'mismatch'], chains: ['tron'], minAmount: 1000 }), [2]); // filters AND together
+    assert.deepEqual(ids({ statuses: ['pending'], chains: ['tron'] }), []);
+    assert.equal(rowDirection(null), null);
+    assert.deepEqual(ids({ mode: 'selected', transactionIds: [5, 3, 3] }), [3, 5]);
+    // validation
+    for (const bad of [
+      { statuses: ['done'] }, { chains: ['sol'] }, { assets: ['U SD'] }, { from: 'tomorrow' }, { from: '2026-05-01T00:00:00Z', to: '2026-04-01T00:00:00Z' }, { minAmount: -1 }, { minAmount: 5, maxAmount: 1 },
+      { direction: 'sideways' }, { fileIds: ['x'] }, { wallets: [''] }, { tzMin: 9999 }, 'verified', [], { mode: 'both' },
+      { mode: 'selected' }, { mode: 'selected', transactionIds: [] }, { mode: 'selected', transactionIds: [1], statuses: ['verified'] }, { transactionIds: [1] }, { mode: 'selected', transactionIds: [0] },
+      { mode: 'selected', transactionIds: Array.from({ length: 5001 }, (_, i) => i + 1) },
+    ]) assert.throws(() => parseScope(bad), /./, JSON.stringify(bad).slice(0, 60));
+    assert.equal(parseScope({ mode: 'selected', transactionIds: Array.from({ length: 5000 }, (_, i) => i + 1) })!.transactionIds!.length, 5000);
+    // ids that belong to another case are rejected; the message does not reveal anything about them
+    assert.throws(() => assertSelectedInCase([1, 99], new Set([1, 2, 3])), (e: Error) => /1 selected transaction does not belong to this case/.test(e.message) && !e.message.includes('99'));
+    assert.doesNotThrow(() => assertSelectedInCase([1, 2], new Set([1, 2, 3])));
+    // an empty scope is a 400 that says why and how many rows exist
+    assert.throws(() => assertNotEmpty(0, 207), (e: Error) => /No transactions match this scope \(0 of 207\)/.test(e.message) && (e as { getStatus?: () => number }).getStatus?.() === 400);
+    assert.doesNotThrow(() => assertNotEmpty(1, 207));
+    // the scope rides in the run's params and survives parseParams unchanged; no scope = none stored
+    assert.equal(parseParams({}).scope, undefined);
+    assert.deepEqual(parseParams({ scope: { statuses: ['verified'], tzMin: 300 } }).scope, { mode: 'all', statuses: ['verified'], tzMin: 300 });
+    assert.deepEqual(parseParams(JSON.parse(JSON.stringify(parseParams({ scope: { mode: 'selected', transactionIds: [3, 4] } })))).scope, { mode: 'selected', transactionIds: [3, 4] }); // stored JSON re-parses
+    assert.throws(() => parseParams({ scope: { statuses: ['nope'] } }));
+    // summary line
+    assert.equal(describeScope(null), 'Scope: all transactions');
+    assert.equal(describeScope(parseScope({ mode: 'selected', transactionIds: [1] })), 'Scope: 1 selected transaction');
+    assert.equal(describeScope(parseScope({ statuses: ['verified'], from: '2026-02-28T19:00:00Z', to: '2026-06-30T18:59:59Z', tzMin: 300, wallets: ['TA', 'TB'] })), 'Scope: verified only, 2026-03-01 → 2026-06-30 (UTC+5), 2 wallets');
+    assert.equal(describeScope(parseScope({ statuses: ['not_found', 'error'], direction: 'deposit', minAmount: 10 })), 'Scope: not found or error only, amount ≥ 10, deposits only');
   }
 
   console.log('selfcheck: all passed');

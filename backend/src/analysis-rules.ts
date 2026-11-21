@@ -1,5 +1,6 @@
 // Case analysis (Phase 8B), pure part: bounded onward trace, pattern rules, path extraction, aggregation. No network, no database: see selfcheck.ts.
 // plan.md rules 4 and 5: every finding carries its evidence rows and the plain-English reason; nothing is inferred without saying it is an inference.
+import type { Scope } from './case-scope';
 import { norm, Transfer } from './chains';
 import { depositEvidence, exchangeName } from './cluster';
 import type { LabelLite } from './labels';
@@ -59,6 +60,7 @@ export interface Params {
   nightMin: number;
   tzMin: number; // minutes east of UTC used for "local" hours
   busyTransfers: number; // a wallet whose first fetched page already holds this many transfers is service-scale: reported as an endpoint, not traced further
+  scope?: Scope; // 10B: which transactions the run looked at (absent = all)
   direction: Direction; // forward: where the money went; backward: where it came from (source of funds); both: two traces
 }
 export type Direction = 'forward' | 'backward' | 'both';
