@@ -5,7 +5,7 @@ import { useMemo, useRef, useState } from 'react';
 import { AssetChips, ChainChoice } from '@/components/Assets';
 import { RequirePerm } from '@/components/Guard';
 import { ConfirmDialog, Modal } from '@/components/Modal';
-import { AddressLink } from '@/components/Risk';
+import { AddressLink, RiskBadge } from '@/components/Risk';
 import { Table } from '@/components/Table';
 import { useToast } from '@/components/Toast';
 import { Badge, Button, Card, EmptyState, ErrorState, Field, Input, Notice, PageHeader, Select, SkeletonRows, Switch, Textarea, Time } from '@/components/ui';
@@ -14,13 +14,14 @@ import { useAuth } from '@/lib/auth';
 import { AssetFilter, assetSym, Chain, detectChain, isEvmAddr } from '@/lib/format';
 import { useApi } from '@/lib/hooks';
 
-interface Item { id: number; chain: string; address: string; note?: string; lastSeenTs?: number; lastCheckedAt?: string; _count?: { alerts: number } }
+interface Item { id: number; chain: string; address: string; note?: string; lastSeenTs?: number; lastCheckedAt?: string; lastRiskLevel?: string | null; lastRiskScore?: number | null; lastRiskAt?: string | null; _count?: { alerts: number } }
 interface Rule { id: number; type: string; params: Record<string, number | string>; enabled: boolean }
 interface WL { id: number; name: string; items: Item[]; rules: Rule[] }
 const RULES: Record<string, { label: string; desc: string; param: string; pl: string; def: number }> = {
   amount_over: { label: 'Large transfer', desc: 'Alert when a single transfer exceeds an amount.', param: 'amount', pl: 'Amount (USD)', def: 10000 },
   flagged_counterparty: { label: 'Flagged counterparty', desc: 'Alert when the wallet transacts with a risky address.', param: 'minWeight', pl: 'Minimum risk weight (0–100)', def: 50 },
   volume_spike: { label: 'Volume spike', desc: 'Alert when activity jumps versus its usual level.', param: 'factor', pl: 'Spike factor (×)', def: 5 },
+  risk_change: { label: 'Risk change', desc: 'Re-scores each watched wallet about once an hour. Alerts when its risk level rises, it becomes frozen, sanctioned or labelled high-risk, or it gains a new direct link to a flagged wallet. The alert shows before / after and the reasons.', param: 'minWeight', pl: 'Flagged counterparty: minimum risk weight (0–100)', def: 50 },
 };
 
 export default function WatchlistDetail() {
@@ -70,6 +71,7 @@ export default function WatchlistDetail() {
                   { key: 'ch', header: 'Chain', cell: (i) => <span className="muted">{i.chain}</span> },
                   { key: 'n', header: 'Note', cell: (i) => <span className="muted">{i.note || '—'}</span> },
                   { key: 'c', header: 'Last checked', sort: (i) => (i.lastCheckedAt ? Date.parse(i.lastCheckedAt) : 0), cell: (i) => <Time t={i.lastCheckedAt} /> },
+                  { key: 'rk', header: 'Risk (last re-score)', cell: (i) => (i.lastRiskLevel ? <RiskBadge level={i.lastRiskLevel} score={i.lastRiskScore ?? 0} /> : <span className="muted small">—</span>) },
                   { key: 'al', header: 'Alerts', num: true, cell: (i) => i._count?.alerts ?? 0 },
                   { key: 'x', header: '', cell: (i) => <Button sm variant="ghost" icon aria-label="Remove address" disabled={!manage} onClick={() => setDel(i)}><Trash2 size={14} /></Button> },
                 ]} />
@@ -81,7 +83,7 @@ export default function WatchlistDetail() {
                   const m = RULES[r.type];
                   return (
                     <div key={r.id} className="row nw" style={{ gap: 12, paddingBottom: 12, borderBottom: '1px solid var(--border)' }}>
-                      <div className="grow"><div style={{ fontWeight: 600 }}>{m?.label ?? r.type}</div><div className="xs muted">{m ? `${m.pl}: ` : ''}{r.params?.[m?.param ?? ''] ?? ''} · {r.params?.asset && r.params.asset !== 'all' ? assetSym(String(r.params.asset)) : 'USDT + USDC'}</div></div>
+                      <div className="grow"><div style={{ fontWeight: 600 }}>{m?.label ?? r.type}</div><div className="xs muted">{m ? `${m.pl}: ` : ''}{r.params?.[m?.param ?? ''] ?? ''} · {r.type === 'risk_change' ? 're-scored hourly' : r.params?.asset && r.params.asset !== 'all' ? assetSym(String(r.params.asset)) : 'USDT + USDC'}</div></div>
                       <Switch label={`Enable ${m?.label ?? r.type}`} checked={r.enabled} disabled={!manage} onChange={(v) => act(() => api(`/rules/${r.id}`, { method: 'PATCH', body: { enabled: v } }), v ? 'Rule enabled' : 'Rule disabled')} />
                       <Button sm variant="ghost" icon aria-label="Delete rule" disabled={!manage} onClick={() => act(() => api(`/rules/${r.id}`, { method: 'DELETE' }), 'Rule deleted')}><Trash2 size={14} /></Button>
                     </div>
@@ -93,7 +95,7 @@ export default function WatchlistDetail() {
                     <Select aria-label="Rule type" value={rt} onChange={(e) => { setRt(e.target.value); setRv(String(RULES[e.target.value].def)); }}>{Object.entries(RULES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}</Select>
                     <span className="xs muted">{RULES[rt].desc}</span>
                     <Field label={RULES[rt].pl}><Input type="number" min="0" value={rv} onChange={(e) => setRv(e.target.value)} /></Field>
-                    <AssetChips label="Rule watches" value={ra} onChange={setRa} />
+                    {rt !== 'risk_change' && <AssetChips label="Rule watches" value={ra} onChange={setRa} />}
                     <Button variant="primary" disabled={!rv} onClick={() => act(() => api(`/watchlists/${id}/rules`, { body: { type: rt, params: { [RULES[rt].param]: Number(rv), asset: ra } } }), 'Rule added')}>Add rule</Button>
                   </div>
                 )}

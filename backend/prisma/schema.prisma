@@ -155,6 +155,10 @@ model WatchItem {
   note          String?
   lastSeenTs    BigInt? // ms timestamp of newest transfer already evaluated
   lastCheckedAt DateTime?
+  lastRiskScore Int? // 9B: last risk re-score, for risk_change alerts
+  lastRiskLevel String?
+  lastRiskAt    DateTime?
+  lastRiskState Json? // RiskSnap: frozen / sanctioned / high-risk label / flagged counterparties at that re-score
   createdAt     DateTime  @default(now())
   alerts        Alert[]
 
@@ -165,7 +169,7 @@ model Rule {
   id          Int       @id @default(autoincrement())
   watchlistId Int
   watchlist   Watchlist @relation(fields: [watchlistId], references: [id], onDelete: Cascade)
-  type        String // amount_over | flagged_counterparty | volume_spike
+  type        String // amount_over | flagged_counterparty | volume_spike | risk_change
   params      Json
   enabled     Boolean   @default(true)
   createdAt   DateTime  @default(now())
@@ -212,8 +216,8 @@ model Case {
   title       String
   description String        @default("")
   status      String        @default("open") // open | closed
-  graphJson   Json?
-  graphPng    String? // data URL captured from the graph workspace
+  graphJson   Json? // legacy single saved graph: superseded by CaseGraph (9B); the column stays until a later cleanup
+  graphPng    String? // legacy, see graphJson
   createdById Int?
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
@@ -222,6 +226,29 @@ model Case {
   files       CaseFile[]
   txs         CaseTransaction[]
   analyses    CaseAnalysis[]
+  graphs      CaseGraph[]
+}
+
+/// A named, immutable-by-default snapshot of a graph saved from the graph workspace (many per case).
+model CaseGraph {
+  id          Int      @id @default(autoincrement())
+  caseId      Int
+  case        Case     @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  name        String
+  remarks     String   @default("")
+  chain       String   @default("tron")
+  rootAddress String?
+  depth       Int?
+  filters     Json? // { fanout, from, to, min, asset }
+  graphJson   Json
+  graphPng    String? // data URL
+  nodeCount   Int      @default(0)
+  edgeCount   Int      @default(0)
+  createdById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([caseId, createdAt])
 }
 
 model CaseAddress {

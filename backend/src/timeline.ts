@@ -47,14 +47,61 @@ export function pickSources(addresses: { address: string; role: string }[]): str
   return first ? [first.address] : [];
 }
 
+/** A saved graph may be stored as a JSON string (older saves); anything unreadable is treated as empty. */
+const parsed = (json: unknown): unknown => {
+  if (typeof json !== 'string') return json;
+  try {
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+};
+const graphParts = (json: unknown): { nodes: any[]; edges: any[]; chain?: string } => {
+  const j: any = parsed(json);
+  const root: any = j && typeof j === 'object' && 'elements' in j ? j.elements : j;
+  if (Array.isArray(root)) return { nodes: root.filter((e) => e?.group !== 'edges' && !e?.data?.source), edges: root.filter((e) => e?.group === 'edges' || e?.data?.source), chain: j?.chain };
+  return { nodes: Array.isArray(root?.nodes) ? root.nodes : [], edges: Array.isArray(root?.edges) ? root.edges : [], chain: root?.chain ?? j?.chain };
+};
+
+/** Counts and root of a saved graph (same rules as the SQL in the 9B case_graphs migration). */
+export function graphStats(json: unknown): { nodes: number; edges: number; chain: string; root: string | null } {
+  const g = graphParts(json);
+  const root = g.nodes.find((n) => n?.data?.root === true || n?.data?.root === 'true')?.data?.id;
+  return { nodes: g.nodes.length, edges: g.edges.length, chain: g.chain || 'tron', root: typeof root === 'string' ? root : null };
+}
+
 /** Wallet addresses in a saved Cytoscape graph (array of elements, or { nodes, edges } / { elements: {...} }). */
 export function graphAddresses(json: unknown): string[] {
-  const root: any = json && typeof json === 'object' && 'elements' in (json as object) ? (json as any).elements : json;
-  const nodes: any[] = Array.isArray(root) ? root.filter((e) => e?.group !== 'edges' && !e?.data?.source) : Array.isArray(root?.nodes) ? root.nodes : [];
   const out = new Set<string>();
-  for (const n of nodes) {
+  for (const n of graphParts(json).nodes) {
     const id = n?.data?.id;
     if (typeof id === 'string' && detectChain(id)) out.add(norm(id));
   }
   return [...out];
+}
+
+/** Runs `fn` over `items` with at most `limit` in flight and a per-item timeout; returns what finished and a message for what did not. */
+export async function boundedMap<T, R>(items: T[], limit: number, timeoutMs: number, deadline: number, fn: (x: T) => Promise<R>, label: (x: T) => string): Promise<{ done: R[]; warnings: string[] }> {
+  const done: R[] = [];
+  const warnings: string[] = [];
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const x = items[next++];
+      if (Date.now() > deadline) {
+        warnings.push(`${label(x)}: skipped, the time budget for this request was used up`);
+        continue;
+      }
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        done.push(await Promise.race([fn(x), new Promise<never>((_, rej) => (timer = setTimeout(() => rej(new Error(`took longer than ${Math.round(timeoutMs / 1000)} s, skipped`)), timeoutMs)))]));
+      } catch (e) {
+        warnings.push(`${label(x)}: ${(e as Error).message}`);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return { done, warnings };
 }

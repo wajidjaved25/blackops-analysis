@@ -9,7 +9,8 @@ import { Analysis, AnalysisReportSection, Result } from '@/components/CaseAnalys
 import { OFF_CHAIN_NOTE, STATUS, TxList } from '@/components/CaseTransactions';
 
 interface Report {
-  case: { id: number; title: string; description?: string; status: string; createdAt: string; graphPng?: string };
+  case: { id: number; title: string; description?: string; status: string; createdAt: string };
+  graphs: { id: number; name: string; remarks: string; chain: string; rootAddress: string | null; nodeCount: number; edgeCount: number; author: string | null; createdAt: string; image: string | null }[];
   addresses: { id: number; chain: string; address: string; role: string; note?: string; risk?: { score: number; level: string; reasons: string[] } }[];
   timeline: { hash: string; from: string; to: string; amount: number; asset?: string; timestamp: number; hop: number | null }[];
   warnings?: string[];
@@ -21,10 +22,8 @@ interface Report {
 export default function ReportPage() {
   const { id } = useParams<{ id: string }>();
   const { data: r, loading, error, status, reload } = useApi<Report>(`/cases/${id}/report`);
-  const c = useApi<{ graphPng?: string }>(`/cases/${id}`);
   const txs = useApi<TxList>(`/cases/${id}/transactions?limit=1000`);
   const an = useApi<Analysis & { result: Result }>(`/cases/${id}/analyses/latest`); // 404 when no analysis was run: the section is then simply absent
-  const png = r?.case.graphPng || c.data?.graphPng;
   return (
     <RequirePerm perm="export.data">
       <div className="page stack">
@@ -49,7 +48,20 @@ export default function ReportPage() {
                   <td><span className="lv">{a.risk?.level ?? 'n/a'}</span>{a.risk ? ` (${a.risk.score})` : ''}</td><td>{[a.note, ...(a.risk?.reasons ?? [])].filter(Boolean).join('; ') || '—'}</td></tr>
               ))}
             </tbody></table>
-            {png && <><h2>Fund-flow graph</h2><img src={png} alt="Fund-flow graph" /></>}
+            {r.graphs.length > 0 && (
+              <>
+                <h2>Fund-flow graphs ({r.graphs.length} saved)</h2>
+                {r.graphs.map((g) => (
+                  <section key={g.id} data-testid="report-graph" style={{ breakInside: 'avoid', marginBottom: 14 }}>
+                    <h3 style={{ margin: '10px 0 2px' }}>{g.name}</h3>
+                    <div className="muted" style={{ fontSize: 11 }}>{g.nodeCount} wallets · {g.edgeCount} links · {g.chain}{g.rootAddress ? ` · root ${g.rootAddress}` : ''} · saved {exact(g.createdAt)}{g.author ? ` by ${g.author}` : ''}</div>
+                    {g.remarks && <p style={{ whiteSpace: 'pre-wrap', margin: '4px 0' }}>{g.remarks}</p>}
+                    {g.image && <img src={g.image} alt={`Graph: ${g.name}`} />}
+                  </section>
+                ))}
+                {r.graphs.some((g) => !g.image) && <p className="muted" style={{ fontSize: 11 }}>Pictures are embedded for the newest 6 snapshots; the others are listed above and can be opened from the case.</p>}
+              </>
+            )}
             {txs.data && txs.data.summary.total > 0 && (
               <>
                 <h2>Transactions (statement and pasted hashes)</h2>

@@ -15,7 +15,7 @@ import { AssetFilter, chainQ, money, num } from '@/lib/format';
 import { useApi } from '@/lib/hooks';
 
 interface Alert { id: number; chain: string; asset?: string; address: string; counterparty?: string; amount: number; txHash?: string; detail?: string; status: string; createdAt: string; rule?: { type: string }; watchItem?: { note?: string; watchlist?: { id: number; name: string } } }
-const RULE: Record<string, string> = { amount_over: 'Large transfer', flagged_counterparty: 'Flagged counterparty', volume_spike: 'Volume spike' };
+const RULE: Record<string, string> = { amount_over: 'Large transfer', flagged_counterparty: 'Flagged counterparty', volume_spike: 'Volume spike', risk_change: 'Risk change' };
 const tone = (s: string) => (s === 'open' ? 'severe' : s === 'reviewing' ? 'medium' : 'good');
 
 export default function Alerts() {
@@ -61,7 +61,7 @@ export default function Alerts() {
                 { key: 'r', header: 'Rule', cell: (a) => RULE[a.rule?.type ?? ''] ?? '—' },
                 { key: 'a', header: 'Address', cell: (a) => <AddressLink address={a.address} chain={a.chain} noCopy /> },
                 { key: 'as', header: 'Asset', cell: (a) => (a.asset === 'all' ? <span className="muted">All</span> : <AssetTag asset={a.asset} />) },
-                { key: 'm', header: 'Amount', num: true, cell: (a) => money(a.amount, a.asset === 'all' ? undefined : a.asset) },
+                { key: 'm', header: 'Amount', num: true, cell: (a) => (a.rule?.type === 'risk_change' ? '—' : money(a.amount, a.asset === 'all' ? undefined : a.asset)) },
                 { key: 'w', header: 'Watchlist', cell: (a) => <span className="muted">{a.watchItem?.watchlist?.name}</span> },
                 { key: 't', header: 'When', cell: (a) => <Time t={a.createdAt} /> },
               ]} />
@@ -74,7 +74,7 @@ export default function Alerts() {
               <dl className="kv" style={{ gridTemplateColumns: '110px 1fr' }}>
                 <dt>Watched address</dt><dd><AddressLink address={open.address} chain={open.chain} /></dd>
                 {open.counterparty && <><dt>Counterparty</dt><dd><AddressLink address={open.counterparty} chain={open.chain} /></dd></>}
-                <dt>Amount</dt><dd>{money(open.amount, open.asset === 'all' ? undefined : open.asset)}</dd>
+                <dt>Amount</dt><dd>{open.rule?.type === 'risk_change' ? '—' : money(open.amount, open.asset === 'all' ? undefined : open.asset)}</dd>
                 {open.txHash && <><dt>Transaction</dt><dd><TxLink hash={open.txHash} chain={open.chain} /></dd></>}
                 <dt>Watchlist</dt><dd>{open.watchItem?.watchlist ? <Link href={`/monitoring/${open.watchItem.watchlist.id}`}>{open.watchItem.watchlist.name}</Link> : '—'}</dd>
                 <dt>Raised</dt><dd><DateTime t={open.createdAt} /></dd>

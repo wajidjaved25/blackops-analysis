@@ -107,7 +107,7 @@ test('graph: bridge node action, hop finder (real: no labels on the other chains
     await dlg.getByLabel('Case').selectOption({ value: String(caseId) });
     await dlg.getByRole('button', { name: 'Save', exact: true }).click();
     await page.waitForURL(`**/cases/${caseId}`);
-    const saved = await call(page, `/cases/${caseId}`);
+    const saved = await call(page, `/cases/${caseId}/graphs/latest`);
     const gj = typeof saved.json.graphJson === 'string' ? saved.json.graphJson : JSON.stringify(saved.json.graphJson);
     expect(gj).toContain('"xchain":true');
     expect(gj).toContain(`"id":"eth:${CRAFTED_DEST}"`); // foreign-chain node ids carry the chain; the old bare ids are untouched
