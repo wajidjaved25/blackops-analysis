@@ -2,6 +2,7 @@
 import { Download, ExternalLink, Eye, Network, Plus, Tag } from 'lucide-react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { useMemo, useState } from 'react';
+import { AiPanel } from '@/components/AiPanel';
 import { AddLabelModal, AddToCaseModal, WatchModal } from '@/components/AddressActions';
 import { AssetChips, AssetTag, ChainChoice } from '@/components/Assets';
 import { RequirePerm } from '@/components/Guard';
@@ -106,6 +107,7 @@ export default function AddressPage() {
                 </span>
               </Notice>
             )}
+            <AiPanel kind="address" chain={d.chain} address={d.address} />
             <div className="grid g-main">
               <Card title="Risk assessment" actions={deep.loading ? <span className="muted small" role="status">Checking 2-hop exposure…</span> : deep.error ? <span className="muted small">2-hop check unavailable</span> : undefined}>
                 <div className="row" style={{ gap: 24, alignItems: 'flex-start' }}>

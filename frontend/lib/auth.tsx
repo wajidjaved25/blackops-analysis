@@ -10,7 +10,7 @@ export interface Me {
 }
 interface Ctx { me: Me | null; loading: boolean; can: (p: string) => boolean; roleName: string; refresh: () => Promise<void> }
 
-const ANALYST = ['investigate.view', 'export.data', 'screen.run', 'labels.view', 'labels.manage', 'monitor.view', 'monitor.manage', 'alerts.triage', 'cases.view', 'cases.manage', 'attribution.run', 'attribution.review'];
+const ANALYST = ['investigate.view', 'export.data', 'screen.run', 'labels.view', 'labels.manage', 'monitor.view', 'monitor.manage', 'alerts.triage', 'cases.view', 'cases.manage', 'attribution.run', 'attribution.review', 'ai.use'];
 const VIEWER = ['investigate.view', 'labels.view', 'monitor.view', 'cases.view'];
 
 const C = createContext<Ctx>({ me: null, loading: true, can: () => false, roleName: '', refresh: async () => {} });

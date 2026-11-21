@@ -21,6 +21,7 @@ export const PERMISSIONS = [
   { key: 'apikeys.manage', group: 'Platform', label: 'Manage API keys', description: 'Create and revoke API keys' },
   { key: 'audit.view', group: 'Platform', label: 'View audit log', description: 'Read the audit log' },
   { key: 'index.manage', group: 'Platform', label: 'Manage data index', description: 'Transfer index coverage, backfills, re-sync and tailer status' },
+  { key: 'ai.use', group: 'Investigate', label: 'Use AI assistant', description: 'AI summaries and questions about addresses and case analyses (when the feature is enabled)' },
   { key: 'org.manage', group: 'Platform', label: 'Manage organisation', description: 'Name, require 2FA, session lifetime' },
 ] as const;
 
@@ -34,7 +35,7 @@ export const SYSTEM_ROLES: { name: string; description: string; permissions: str
   {
     name: 'Analyst',
     description: 'Investigates, screens, monitors and works cases',
-    permissions: ['investigate.view', 'export.data', 'screen.run', 'labels.view', 'labels.manage', 'monitor.view', 'monitor.manage', 'alerts.triage', 'cases.view', 'cases.manage', 'attribution.run', 'attribution.review'],
+    permissions: ['investigate.view', 'export.data', 'screen.run', 'labels.view', 'labels.manage', 'monitor.view', 'monitor.manage', 'alerts.triage', 'cases.view', 'cases.manage', 'attribution.run', 'attribution.review', 'ai.use'],
   },
   { name: 'Viewer', description: 'Read-only access', permissions: ['investigate.view', 'labels.view', 'monitor.view', 'cases.view'] },
 ];

@@ -2,6 +2,7 @@
 import cytoscape, { Core, ElementDefinition } from 'cytoscape';
 import { AlertTriangle, ChevronDown, Play } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { AiPanel } from '@/components/AiPanel';
 import { RadialHeatmap } from '@/components/charts';
 import { AddressLink, RiskBadge, TxLink } from '@/components/Risk';
 import { Table } from '@/components/Table';
@@ -258,6 +259,7 @@ export function AnalysisTab({ id }: { id: string }) {
           )}
         </div>
       </Card>
+      <AiPanel kind="case" caseId={id} />
       {shown?.status === 'failed' && <Notice tone="error"><AlertTriangle size={14} /> Run #{shown.id} failed: {shown.error}</Notice>}
       {!shown && <Card><EmptyState title="No analysis yet">Add transactions to the case (Transactions tab), then run an analysis.</EmptyState></Card>}
       {doneId && detail.loading && !detail.data && <div className="card"><SkeletonRows rows={6} /></div>}

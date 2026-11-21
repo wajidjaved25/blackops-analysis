@@ -55,7 +55,7 @@ export class InvestigateController {
   }
 
   /** Transfers, balance and freeze status are fetched concurrently; `deep` (2-hop risk, ~5 more wallets) is opt-in — the UI loads GET /risk/:addr separately. */
-  private async summary(chain: Chain, addr: string, limit: number, orgId: number, deep = false, asset: AssetFilter = 'all') {
+  async summary(chain: Chain, addr: string, limit: number, orgId: number, deep = false, asset: AssetFilter = 'all') {
     const [transfers, balances, frozenMap] = await Promise.all([getTransfers(chain, addr, limit, false, 'lookup', asset), getBalances(chain, addr), frozenStatus(chain, addr)]);
     const risk = await this.risk.assess(chain, addr, orgId, { transfers, deep, frozen: frozenMap });
     let totalIn = 0;

@@ -276,3 +276,18 @@ Goal: wallets of Binance and other major exchanges are labelled automatically fr
   - **Hook for 8B (wire at merge):** `BinancePor.check(addresses: {chain: 'tron'|'eth'|'bsc'; address: string}[]): Promise<PorResult>` (injectable, add `BinancePor` to providers; already in `app.module.ts` on this branch). Call it from the case analysis with ALL wallets (recipients plus traced), then re-read labels (`labels.lookup`). It throws if Binance is unreachable: catch and continue, labelling is best-effort. Dedupes and lowercases 0x itself.
   - Statement labels: importing a Binance statement (`exchangeOfFormat`) upserts, per distinct valid address of each "Off-chain transfer" row, `source=statement`, `category=exchange`, confidence 0.9, name "Binance deposit address (per exchange statement: case #N, "file")", `sourceUrl` null. **Org-scoped** (`orgId` = importing org, never global): a customer statement is case evidence, not a public fact; one row per (address, org), a later statement refreshes the case/file in the name; not removed when the case file is deleted. Attribution (`attribution.ts`) no longer treats `statement` labels or any "deposit address" label as a hot wallet; `exchangeName` strips "hot/cold wallet" / "deposit address".
 - 8.18: Labels page source badges + source/exchange filters, address-page exchange banner, selfcheck asserts, `frontend/e2e/exchange-labels.spec.ts`.
+
+
+## Phase 9D - AI investigation assistant (feature-flagged, "Coming soon" on staging)
+Decision 2026-11-21: build it fully, ship OFF (`AI_ENABLED=false`). New dependency: `@anthropic-ai/sdk` 1.12.0 (official SDK: auth, retries, timeouts and typed errors for the Messages API; a hand-rolled fetch client would re-implement those). Loaded lazily, only when the flag is on.
+- [x] `backend/src/ai.ts`: flag, `GET /ai/status`, `POST /ai/address-summary`, `/ai/case-summary`, `/ai/ask`; permission `ai.use` (Owner/Admin/Analyst)
+- [x] Bounded context builders (address, case analysis), untrusted-text sanitising + escaped data block, strict system prompt (cite ids, "not in the data", no identity claims)
+- [x] Citation extraction verified against the context (unverified ids reported, never linked)
+- [x] Per-input-hash cache 1 h, per-user rate limit, audit log without prompt bodies, input and output caps
+- [x] Disabled path: 503 `ai_disabled`, no client created, no network call (asserted in `npm run check`)
+- [x] Frontend `AiPanel` on the address page and the case Analysis tab: Coming-soon state (disabled button + badge, no AI calls), enabled state with citation links, notice, copy, loading/error, Ask box
+- [x] `npm run check` (mocked client), frontend `npm run build`, `frontend/e2e/ai.spec.ts` (disabled state, both pages, mobile width, no AI calls)
+- [ ] Live model calls: **untested** (no API key in this environment). The enabled UI path was not exercised in a browser; prompt quality and the real SDK response shape are unverified.
+- [ ] Streaming (optional, not built); prompt caching (not used: results are cached per input instead)
+
+**9D status:** done on branch wt-d, flag OFF. To enable on staging: set `AI_ENABLED=true`, `ANTHROPIC_API_KEY`, optionally `AI_MODEL`, restart, then try a summary and read the first answers critically before announcing it.
